@@ -49,7 +49,7 @@ Each agent has its own skill storage location and filename convention. Once a sk
 | Complete lifecycle state machine | ❌ | ❌ | ❌ | ✅ |
 | Source auditable (no build toolchain) | ❌ (cargo) | ❌ (tsc/npm) | ❌ (go build) | ✅ |
 
-Each has its strengths. See `docs/PRD.md` §5.4 for detailed comparison.
+Each has its strengths. See `docs/COMPETITORS.md` for detailed comparison.
 
 ## Quick Start
 
@@ -147,12 +147,12 @@ All write commands support `--dry-run`; `purge` requires `--yes`.
 
 ## Documentation
 
-- [PRD](docs/PRD.md) - full requirements doc (Chinese)
 - [Architecture](docs/ARCHITECTURE.md) - event log + CAS + replay detailed design (Chinese)
-- [iCloud deployment](docs/ICLOUD_SYNC.md) - iCloud multi-machine guide (TODO)
-- [Domestic cloud drives](docs/CN_CLOUD_DRIVES.md) - Nutstore/Baidu/Quark/Aliyun (TODO)
-- [Linux deployment](docs/LINUX_GUIDE.md) - systemd config (TODO)
-- [Competitor comparison](docs/COMPETITORS.md) - detailed (TODO)
+- [iCloud deployment](docs/ICLOUD_SYNC.md) - iCloud multi-machine guide
+- [Domestic cloud drives](docs/CN_CLOUD_DRIVES.md) - Nutstore/Baidu/Quark/Aliyun
+- [Linux deployment](docs/LINUX_GUIDE.md) - systemd config
+- [Competitor comparison](docs/COMPETITORS.md) - detailed
+- [Troubleshooting](docs/TROUBLESHOOTING.md) - common issues
 
 ## Design Principles
 

@@ -1,5 +1,5 @@
 # Source repo .gitignore (for the skillmesh-cli project itself)
-# Runtime hub .gitignore (when sync_backend=git) is documented in docs/PRD.md §12.3.2.
+# Runtime hub .gitignore (when sync_backend=git) is documented in docs/ARCHITECTURE.md.
 
 # Python
 __pycache__/

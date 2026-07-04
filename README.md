@@ -49,7 +49,7 @@ AI 编码助手（Agent）生态爆发，一名开发者常同时用 2-5 个 Age
 | 完整 lifecycle 状态机 | ❌ | ❌ | ❌ | ✅ |
 | 源码可审计（无 build toolchain） | ❌（cargo） | ❌（tsc/npm） | ❌（go build） | ✅ |
 
-各有特点，不刻意对标。详细对比见 `docs/PRD.md` §5.4。
+各有特点，不刻意对标。详细对比见 `docs/COMPETITORS.md`。
 
 ## 快速开始
 
@@ -147,12 +147,12 @@ macOS 用 launchd，Linux 用 systemd user unit。
 
 ## 文档
 
-- [PRD](docs/PRD.md) - 完整需求文档
 - [架构设计](docs/ARCHITECTURE.md) - event log + CAS + replay 详细设计
-- [iCloud 部署](docs/ICLOUD_SYNC.md) - iCloud 多机部署指南（待写）
-- [国产网盘部署](docs/CN_CLOUD_DRIVES.md) - 坚果云/百度/夸克/阿里云盘（待写）
-- [Linux 部署](docs/LINUX_GUIDE.md) - systemd 配置（待写）
-- [竞品对比](docs/COMPETITORS.md) - 详细对比（待写）
+- [iCloud 部署](docs/ICLOUD_SYNC.md) - iCloud 多机部署指南
+- [国产网盘部署](docs/CN_CLOUD_DRIVES.md) - 坚果云/百度/夸克/阿里云盘
+- [Linux 部署](docs/LINUX_GUIDE.md) - systemd 配置
+- [竞品对比](docs/COMPETITORS.md) - 与 qufei1993/skillstash/axon-cli 详细对比
+- [故障排查](docs/TROUBLESHOOTING.md) - 常见问题
 
 ## 设计原则
 

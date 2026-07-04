@@ -41,3 +41,6 @@ backups/
 # Test artifacts
 .coverage
 htmlcov/
+
+# Internal design doc - do not publish
+docs/PRD.md

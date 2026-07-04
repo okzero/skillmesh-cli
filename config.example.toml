@@ -1,0 +1,156 @@
+# Skillmesh configuration (TOML format, requires Python 3.11+)
+#
+# Copy this file to ~/.config/skillmesh/config.toml and edit.
+# JSON format (config.json) is also supported for Python 3.9/3.10.
+#
+# Path priority:
+#   1. --config <path>          (CLI flag)
+#   2. $SKILLMESH_CONFIG        (env var)
+#   3. ~/.config/skillmesh/config.toml
+#   4. ~/.config/skillmesh/config.json
+
+[hub]
+# Path to the skillmesh hub directory. Must be inside a sync backend
+# (iCloud / Dropbox / Google Drive / Syncthing / Nutstore / Baidu / Quark /
+# Aliyun Drive / git / manual). The tool does not verify sync, only assumes
+# the hub dir is synced across machines.
+path = "~/Library/Mobile Documents/com~apple~CloudDocs/skillmesh"
+
+# Sync backend identifier. Documentation hint only, tool does not validate.
+# Optional values: icloud | dropbox | gdrive | syncthing | jianguoyun |
+#                  baidu | quark | aliyundrive | git | manual
+sync_backend = "icloud"
+
+# Compact threshold: when event count exceeds this, scan auto-compacts
+# snapshot. Set to 0 to disable auto-compact (use `skillmesh compact`).
+# Default: 1000
+compact_threshold = 1000
+
+
+# Source labels: map local directory prefixes to source labels.
+# Used only by local discover (path -> label mapping). Not synced.
+# Skill entries retain their source label as cross-machine metadata:
+# Machine B can receive skills with source="work" via sync without
+# configuring a corresponding [[sources]] entry.
+[[sources]]
+label = "work"
+prefix = "~/Documents/work"
+
+[[sources]]
+label = "personal"
+prefix = "~/Documents/personal"
+
+# Example: additional source
+# [[sources]]
+# label = "team-a"
+# prefix = "~/projects/team-a/skills"
+
+
+# Agents: declare which agents receive which source's skills.
+# layout: "directory" (whole skill dir symlinked to <dir>/<skill-name>/)
+#       or "file" (entry file symlinked to <dir>/<target_filename>)
+# file layout requires target_filename with {skill} placeholder.
+# "single-file" (one file fanout to <dir>/CLAUDE.md) is v1.1+, not in v1.
+
+[[agents]]
+name = "codex"
+dir = "~/.codex/skills"
+accept_sources = ["work", "personal"]
+layout = "directory"
+
+[[agents]]
+name = "claude-code"
+dir = "~/.claude/skills"
+accept_sources = ["work", "personal"]
+layout = "directory"
+
+[[agents]]
+name = "cursor"
+dir = "~/.cursor/rules"
+accept_sources = ["personal"]
+layout = "file"
+target_filename = "{skill}.mdc"
+
+# Example: additional agent
+# [[agents]]
+# name = "cline"
+# dir = "~/.cline/skills"
+# accept_sources = ["work", "personal"]
+# layout = "directory"
+
+
+# Skill file formats: discover recognizes a directory as a skill if it
+# contains any of the declared filenames. First match wins (order = array order).
+[[formats]]
+name = "skill-md"
+filename = "SKILL.md"
+
+[[formats]]
+name = "claude-md"
+filename = "CLAUDE.md"
+
+[[formats]]
+name = "cursor-rules"
+filename = ".cursorrules"
+
+[[formats]]
+name = "windsurf-rules"
+filename = ".windsurfrules"
+
+[[formats]]
+name = "skill-json"
+filename = "skill.json"
+
+
+# Watch: directories to scan for new skills.
+[watch]
+interval = 60  # seconds, daemon scan interval
+
+dirs = [
+  "~/.codex/skills",
+  "~/.claude/skills",
+  "~/.cursor/rules",
+  "~/Documents/work",
+  "~/Documents/personal",
+]
+
+# Exclude patterns (substring match). Default excludes skillmesh itself.
+exclude = [
+  "skillmesh",
+  "/.git/",
+  "node_modules",
+  "__pycache__",
+  ".venv",
+  "site-packages",
+  "/.system",
+]
+
+
+# Conflict file patterns: discover skips and warns.
+# Default values are estimates, marked "to be verified" - community PRs welcome
+# to add real-world patterns from each cloud drive client.
+[conflicts]
+patterns = [
+  "\\(\\d+\\)\\.",   # iCloud/Dropbox: foo (1).md
+  "冲突",             # Chinese: 冲突副本
+  "_conflict",        # Nutstore: foo_conflict.md
+  "\\.conflict$",     # generic: foo.conflict
+]
+
+
+# Placeholder file suffixes: discover marks SYNC-PENDING, not orphan.
+# Default values are estimates, marked "to be verified".
+[placeholders]
+suffixes = [
+  ".icloud",          # iCloud: foo.md.icloud
+  ".baidudisk",       # Baidu Netdisk
+  ".downloading",     # Aliyun Drive
+  ".tmp",             # generic
+]
+
+
+# Backup: stored locally, NOT inside hub (to avoid cloud drive syncing it).
+# Default: ~/.local/state/skillmesh/backups (Linux)
+#          ~/Library/Application Support/skillmesh/backups (macOS)
+[backup]
+path = "~/.local/state/skillmesh/backups"

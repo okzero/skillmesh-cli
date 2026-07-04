@@ -1,0 +1,43 @@
+# Source repo .gitignore (for the skillmesh-cli project itself)
+# Runtime hub .gitignore (when sync_backend=git) is documented in docs/PRD.md §12.3.2.
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# User config (never commit user-specific configs)
+config.toml
+config.json
+
+# Runtime state (never commit user runtime state)
+*.lock
+.skillmesh.log
+.skillmesh.err
+.sync-state.json
+host.json
+
+# Backup files (local only)
+backups/
+
+# Test artifacts
+.coverage
+htmlcov/

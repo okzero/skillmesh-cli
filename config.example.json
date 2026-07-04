@@ -1,0 +1,86 @@
+{
+  "_comment": "Skillmesh configuration (JSON format, all Python versions). Copy to ~/.config/skillmesh/config.json. TOML format (config.toml) is preferred for Python 3.11+. JSON does not support comments - all field meanings documented in config.example.toml.",
+
+  "hub": {
+    "path": "~/Library/Mobile Documents/com~apple~CloudDocs/skillmesh",
+    "sync_backend": "icloud",
+    "compact_threshold": 1000
+  },
+
+  "sources": [
+    {"label": "work", "prefix": "~/Documents/work"},
+    {"label": "personal", "prefix": "~/Documents/personal"}
+  ],
+
+  "agents": [
+    {
+      "name": "codex",
+      "dir": "~/.codex/skills",
+      "accept_sources": ["work", "personal"],
+      "layout": "directory"
+    },
+    {
+      "name": "claude-code",
+      "dir": "~/.claude/skills",
+      "accept_sources": ["work", "personal"],
+      "layout": "directory"
+    },
+    {
+      "name": "cursor",
+      "dir": "~/.cursor/rules",
+      "accept_sources": ["personal"],
+      "layout": "file",
+      "target_filename": "{skill}.mdc"
+    }
+  ],
+
+  "formats": [
+    {"name": "skill-md", "filename": "SKILL.md"},
+    {"name": "claude-md", "filename": "CLAUDE.md"},
+    {"name": "cursor-rules", "filename": ".cursorrules"},
+    {"name": "windsurf-rules", "filename": ".windsurfrules"},
+    {"name": "skill-json", "filename": "skill.json"}
+  ],
+
+  "watch": {
+    "interval": 60,
+    "dirs": [
+      "~/.codex/skills",
+      "~/.claude/skills",
+      "~/.cursor/rules",
+      "~/Documents/work",
+      "~/Documents/personal"
+    ],
+    "exclude": [
+      "skillmesh",
+      "/.git/",
+      "node_modules",
+      "__pycache__",
+      ".venv",
+      "site-packages",
+      "/.system"
+    ]
+  },
+
+  "conflicts": {
+    "patterns": [
+      "\\(\\d+\\)\\.",
+      "冲突",
+      "_conflict",
+      "\\.conflict$"
+    ]
+  },
+
+  "placeholders": {
+    "suffixes": [
+      ".icloud",
+      ".baidudisk",
+      ".downloading",
+      ".tmp"
+    ]
+  },
+
+  "backup": {
+    "path": "~/.local/state/skillmesh/backups"
+  }
+}

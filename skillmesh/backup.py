@@ -125,8 +125,14 @@ def _safe_extract(tar: "tarfile.TarFile", dest: Path) -> None:
             raise BackupError(
                 f"absolute path in tar, refusing to extract: {member.name}"
             )
-    # All members validated, extract
-    tar.extractall(dest)
+    # All members validated, extract (use 'data' filter for Python 3.12+
+    # to also reject things like device files, fifos, etc.)
+    try:
+        tar.extractall(dest, filter="data")
+    except TypeError:
+        # Python < 3.12 - filter argument not supported, fall back
+        # (we already validated members above)
+        tar.extractall(dest)
 
 
 def list_backups(backup_root: Path) -> List[dict]:

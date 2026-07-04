@@ -79,10 +79,9 @@ def _scan(home: Path, hub: Path, host: Host, config: Config):
     manifest = manifest_mod.rebuild(snapshot, event_log, config, host.host_id)
     manifest_mod.save(manifest, hub / "manifest.json")
 
-    # Materialize skills from sync (events from other machines) and rebuild links
-    # This mirrors cli._cmd_scan's post-execute step.
-    pipeline.materialize_missing(manifest, config, hub)
-    pipeline.relink_all(manifest, config, hub)
+    # Reconcile skills/ working view with manifest's logical state.
+    # This handles: ADD materialization, sync from other machines, link refresh.
+    pipeline.reconcile_skills(manifest, config, hub)
 
 
 def test_dual_machine_convergence(tmp_path, monkeypatch):

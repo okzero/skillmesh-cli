@@ -120,12 +120,31 @@ def validate(plan_result: PlanResult, config: Config,
                     agent_dir = config.resolve_agent_dir(agent)
                     if not agent_dir.parent.exists():
                         op.block(f"agent parent dir missing: {agent_dir.parent}")
+                    # M2: detect user content at target path - refuse to overwrite
+                    link_path = _agent_link_path(op.name, agent, config)
+                    if link_path.exists() and not link_path.is_symlink():
+                        op.block(
+                            f"refusing to overwrite non-symlink at "
+                            f"{link_path} (user content may be present). "
+                            f"Remove it manually first."
+                        )
         elif op.type == OpType.ORPHAN:
             # Check if entry is in .uninstalled/
             uninstalled = hub_path / ".uninstalled" / op.name
             if uninstalled.exists():
                 op.skip()  # not orphan, just isolated
     return plan_result
+
+
+def _agent_link_path(name: str, agent: Agent, config: Config) -> Path:
+    """Compute the symlink path for a skill in an agent's dir."""
+    agent_dir = config.resolve_agent_dir(agent)
+    if agent.layout == "directory":
+        return agent_dir / name
+    elif agent.layout == "file":
+        target_filename = agent.target_filename.replace("{skill}", name)
+        return agent_dir / target_filename
+    return agent_dir / name  # fallback
 
 
 def execute(plan_result: PlanResult, config: Config, host: Host,
@@ -172,6 +191,10 @@ def materialize_missing(manifest: Manifest, config: Config, hub_path: Path) -> i
     Used after sync from another machine: events are replayed into manifest,
     but skills/<name>/ working view needs to be created from blobs.
     Returns count of materialized skills.
+
+    Note: this only ADDS missing skills. To also refresh stale materializations
+    (e.g., after update where manifest's content_hash differs from what's
+    materialized), use reconcile_skills() instead.
     """
     skills_dir = hub_path / "skills"
     blobs_dir = hub_path / "blobs"
@@ -190,12 +213,107 @@ def materialize_missing(manifest: Manifest, config: Config, hub_path: Path) -> i
             continue
         try:
             cas.materialize(entry.content_hash, name, skills_dir, blobs_dir)
+            _write_owned_marker(target, entry.content_hash)
             _apply_links(name, entry, config, skills_dir)
             count += 1
         except FileNotFoundError:
             # blob not yet synced, will retry on next scan
             pass
     return count
+
+
+def reconcile_skills(manifest: Manifest, config: Config, hub_path: Path) -> int:
+    """Reconcile skills/ working view with manifest's logical state.
+
+    Single source of truth for skills/<name>/ contents. Used after execute,
+    rollback, sync, etc.
+
+    For each skill in manifest:
+    - If tombstone state is purging/gc_prepare: remove from skills/ (if
+      skillmesh-owned)
+    - If in_hub=False: skip (content is in .uninstalled/)
+    - If skills/<name>/ missing: materialize from blob
+    - If skills/<name>/ exists but content_hash marker differs from manifest:
+      rematerialize (covers update with mixed-conflict where manifest keeps
+      old version but execute materialized new)
+    - Apply links to all target agents
+
+    Returns count of changes (materialized + rematerialized + removed).
+    """
+    skills_dir = hub_path / "skills"
+    blobs_dir = hub_path / "blobs"
+    skills_dir.mkdir(parents=True, exist_ok=True)
+
+    changes = 0
+    for name, entry in manifest.skills.items():
+        tomb = manifest.tombstones.get(name)
+        target = skills_dir / name
+
+        # Purging skills: remove working view
+        if tomb and tomb.state in ("purging", "gc_prepare"):
+            if target.exists() or target.is_symlink():
+                try:
+                    cas._safe_remove(target)
+                    changes += 1
+                except RuntimeError:
+                    pass  # refuses to delete user content
+            continue
+
+        if not entry.in_hub:
+            continue  # uninstalled, content is in .uninstalled/
+
+        if not entry.content_hash:
+            continue
+
+        # Check if materialization matches manifest
+        needs_materialize = False
+        if not target.exists() and not target.is_symlink():
+            needs_materialize = True
+        else:
+            # Compare marker's content_hash with manifest's
+            current_hash = _read_owned_marker(target)
+            if current_hash != entry.content_hash:
+                needs_materialize = True
+
+        if needs_materialize:
+            try:
+                cas.materialize(entry.content_hash, name, skills_dir, blobs_dir)
+                _write_owned_marker(target, entry.content_hash)
+                changes += 1
+            except FileNotFoundError:
+                # blob not yet synced, will retry on next scan
+                continue
+            except RuntimeError:
+                # _safe_remove refused to delete user content - skip
+                continue
+
+        # Apply links (idempotent)
+        if entry.target_override != []:
+            _apply_links(name, entry, config, skills_dir)
+
+    return changes
+
+
+def _write_owned_marker(target: Path, content_hash: str) -> None:
+    """Write .skillmesh-owned marker with current content_hash for reconcile."""
+    (target / ".skillmesh-owned").write_text(
+        f"content_hash={content_hash}\n"
+    )
+
+
+def _read_owned_marker(target: Path) -> str:
+    """Read content_hash from .skillmesh-owned marker, or empty if missing."""
+    marker = target / ".skillmesh-owned"
+    if not marker.exists():
+        return ""
+    try:
+        text = marker.read_text()
+        for line in text.splitlines():
+            if line.startswith("content_hash="):
+                return line.split("=", 1)[1].strip()
+    except OSError:
+        pass
+    return ""
 
 
 def relink_all(manifest: Manifest, config: Config, hub_path: Path) -> int:
@@ -220,6 +338,18 @@ def relink_all(manifest: Manifest, config: Config, hub_path: Path) -> int:
 
 def _execute_add(op: Op, config: Config, host: Host, blobs_dir: Path,
                  skills_dir: Path, event_log: EventLog) -> None:
+    """Write blob + add event. Materialization deferred to reconcile_skills().
+
+    Why defer: F6.4 conflict resolution happens in manifest replay, not here.
+    If this is a mixed-version conflict, replay may decide to keep the OLD
+    version. Materializing here would overwrite skills/ with NEW content,
+    creating inconsistency with manifest. reconcile_skills() runs after
+    manifest rebuild and materializes whatever manifest says is the winner.
+
+    Orphan blob note: if reconcile fails (e.g., blob deleted before sync),
+    the blob written here remains unreferenced. lifecycle.gc() will clean
+    it up as an orphan. Self-healing.
+    """
     c = op.candidate
     content_hash = cas.write_blob(
         skill_dir=c.path,
@@ -237,14 +367,19 @@ def _execute_add(op: Op, config: Config, host: Host, blobs_dir: Path,
         blob_hash=blob_hash, content_hash=content_hash,
     )
     event_log.write("add", entry)
-    cas.materialize(content_hash, c.name, skills_dir, blobs_dir)
-    _apply_links(c.name, entry, config, skills_dir)
+    # Materialization + linking handled by reconcile_skills() in caller
 
 
 def _execute_update(op: Op, config: Config, host: Host, blobs_dir: Path,
                     skills_dir: Path, event_log: EventLog) -> None:
-    # F6.4 conflict resolution handled in manifest replay;
-    # here we just write the new blob + event + materialize.
+    """Write new blob + update event. Materialization deferred to reconcile_skills().
+
+    F6.4 conflict resolution: this writes the new blob + event. Manifest
+    replay will decide winner (SemVer / Lamport / MIXED-VERSION-CONFLICT).
+    reconcile_skills() then materializes manifest's chosen version. If mixed
+    conflict, manifest keeps OLD content_hash, so skills/ stays at OLD -
+    consistent with manifest.
+    """
     c = op.candidate
     content_hash = cas.write_blob(
         skill_dir=c.path, skill_name=c.name,
@@ -259,8 +394,7 @@ def _execute_update(op: Op, config: Config, host: Host, blobs_dir: Path,
         blob_hash=blob_hash, content_hash=content_hash,
     )
     event_log.write("update", entry)
-    cas.materialize(content_hash, c.name, skills_dir, blobs_dir)
-    _apply_links(c.name, entry, config, skills_dir)
+    # Materialization + linking handled by reconcile_skills() in caller
 
 
 def _execute_relink(op: Op, config: Config, skills_dir: Path) -> None:

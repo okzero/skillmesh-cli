@@ -47,7 +47,7 @@ AI 编码助手（Agent）生态爆发，一名开发者常同时用 2-5 个 Age
 | Peer-write 并发（双机同时改） | ❌ | ⚠️（靠 git merge） | ⚠️（靠 git merge） | ✅ |
 | CAS blob 存储 | ❌ | ❌ | ❌ | ✅ |
 | 完整 lifecycle 状态机 | ❌ | ❌ | ❌ | ✅ |
-| 单脚本可审计（无 build toolchain） | ❌（cargo） | ❌（tsc/npm） | ❌（go build） | ✅ |
+| 源码可审计（无 build toolchain） | ❌（cargo） | ❌（tsc/npm） | ❌（go build） | ✅ |
 
 各有特点，不刻意对标。详细对比见 `docs/PRD.md` §5.4。
 
@@ -161,7 +161,7 @@ macOS 用 launchd，Linux 用 systemd user unit。
 3. **真相源单一**：snapshot + events + blobs 跨机同步；manifest 派生可重建
 4. **fail-closed**：snapshot/event 损坏不静默覆盖，要求人工介入
 5. **零依赖**：仅 Python3 标准库
-6. **可审计**：单脚本可直接读改，无 build toolchain
+6. **可审计**：纯 Python 源码可直接读改，无 build toolchain
 
 ## License
 

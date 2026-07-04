@@ -246,12 +246,13 @@ def _cmd_scan(args, config, host, hub_path) -> int:
         # Rebuild manifest after execution to reflect new events
         manifest = manifest_mod.rebuild(snapshot, event_log, config, host.host_id)
         manifest_mod.save(manifest, manifest_path)
-        # Materialize skills from sync (events from other machines)
-        # and rebuild symlinks for all active skills
-        materialized = pipeline.materialize_missing(manifest, config, hub_path)
-        if materialized:
-            print(f"materialized from sync: {materialized}")
-        pipeline.relink_all(manifest, config, hub_path)
+        # Reconcile skills/ working view with manifest's logical state.
+        # This handles: ADD (materialize new), UPDATE (materialize winner,
+        # including reverting to OLD if mixed-conflict), sync from other
+        # machines, link refresh, etc. Single source of truth for skills/.
+        changes = pipeline.reconcile_skills(manifest, config, hub_path)
+        if changes:
+            print(f"reconciled: {changes} skill(s)")
 
     # Report
     print(f"succeeded: {len(exec_result.succeeded)}")
@@ -464,7 +465,10 @@ def _cmd_gc(args, config, host, hub_path) -> int:
         manifest, event_log, hub_path, blobs_dir,
         dry_run=getattr(args, "dry_run", False),
     )
-    print(f"gc removed: {removed} blob(s)")
+    if getattr(args, "dry_run", False):
+        print(f"gc would remove: {removed} blob(s)")
+    else:
+        print(f"gc removed: {removed} blob(s)")
     return 0
 
 

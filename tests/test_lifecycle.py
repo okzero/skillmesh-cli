@@ -225,3 +225,108 @@ def test_forget_not_in_uninstalled_errors(tmp_path):
 
     with pytest.raises(lifecycle.LifecycleError):
         lifecycle.forget("nonexistent", manifest, event_log, config, hub, skills_dir)
+
+
+def test_gc_keeps_uninstalled_skill_blob(tmp_path):
+    """B1: gc does NOT delete blob of uninstalled skill (recoverable via forget)."""
+    host, hub, config, entry, skills_dir = _setup_env(tmp_path)
+    event_log = EventLog(hub / "events", host)
+
+    # Create the blob
+    from skillmesh import cas
+    blobs_dir = hub / "blobs"
+    content_hash = cas.write_blob(skills_dir / "my-skill", "my-skill",
+                                  "skill-md", "1.0.0", blobs_dir, host.host_id)
+    entry.content_hash = content_hash
+
+    # Write add event first so manifest.skills has the entry after rebuild
+    event_log.write("add", entry)
+    # Rebuild manifest with the add event
+    snapshot = {"version": 1, "skills": {}, "tombstones": {}, "included_events": []}
+    manifest = manifest_mod.rebuild(snapshot, event_log, config, host.host_id)
+    # Uninstall (move to .uninstalled/)
+    lifecycle.uninstall("my-skill", manifest, event_log, config, hub)
+    # Rebuild manifest to reflect uninstall event
+    manifest = manifest_mod.rebuild(snapshot, event_log, config, host.host_id)
+
+    # Run gc - should NOT delete the blob (uninstalled is recoverable)
+    removed = lifecycle.gc(manifest, event_log, hub, blobs_dir, dry_run=False)
+    assert removed == 0  # nothing removed
+    # Blob still exists
+    assert (blobs_dir / content_hash).exists()
+
+
+def test_gc_deletes_purged_blob_only_when_all_hosts_confirmed(tmp_path):
+    """M4: gc only deletes purged skill's blob when ALL hosts confirmed purge."""
+    host, hub, config, entry, skills_dir = _setup_env(tmp_path)
+    event_log = EventLog(hub / "events", host)
+
+    from skillmesh import cas
+    blobs_dir = hub / "blobs"
+    content_hash = cas.write_blob(skills_dir / "my-skill", "my-skill",
+                                  "skill-md", "1.0.0", blobs_dir, host.host_id)
+    entry.content_hash = content_hash
+
+    # Write add event first
+    event_log.write("add", entry)
+    snapshot = {"version": 1, "skills": {}, "tombstones": {}, "included_events": []}
+    manifest = manifest_mod.rebuild(snapshot, event_log, config, host.host_id)
+    # Purge
+    lifecycle.purge("my-skill", manifest, event_log, config, hub, yes=True)
+
+    # Rebuild manifest
+    manifest = manifest_mod.rebuild(snapshot, event_log, config, host.host_id)
+
+    # gc with only ONE host (this one) - it wrote purge, so all known hosts confirmed
+    removed = lifecycle.gc(manifest, event_log, hub, blobs_dir, dry_run=False)
+    # Single host, all confirmed - blob should be deleted
+    assert removed >= 1
+    assert not (blobs_dir / content_hash).exists()
+
+
+def test_gc_does_not_delete_when_other_host_missing_purge(tmp_path):
+    """M4: gc refuses to delete purged blob when another host hasn't purged yet."""
+    host, hub, config, entry, skills_dir = _setup_env(tmp_path)
+    event_log = EventLog(hub / "events", host)
+
+    from skillmesh import cas
+    blobs_dir = hub / "blobs"
+    content_hash = cas.write_blob(skills_dir / "my-skill", "my-skill",
+                                  "skill-md", "1.0.0", blobs_dir, host.host_id)
+    entry.content_hash = content_hash
+
+    # Write add event first
+    event_log.write("add", entry)
+    snapshot = {"version": 1, "skills": {}, "tombstones": {}, "included_events": []}
+    manifest = manifest_mod.rebuild(snapshot, event_log, config, host.host_id)
+    # Purge on this host
+    lifecycle.purge("my-skill", manifest, event_log, config, hub, yes=True)
+
+    # Simulate another host's event_dir exists (with non-purge event)
+    other_host_dir = hub / "events" / "other-host-deadbeef"
+    other_host_dir.mkdir(parents=True)
+    # Write a non-purge event (e.g., add) from other host
+    import json, time
+    other_event = {
+        "id": "other-uuid",
+        "host": "deadbeef-0000-0000-0000-000000000000",
+        "host_display_name": "other-host",
+        "ts": time.time_ns(),
+        "seq": 1,
+        "lamport": 1,
+        "op": "add",
+        "skill": entry.to_dict(),
+        "prev_lamport": 0,
+        "schema_version": 1,
+    }
+    (other_host_dir / "1-1-deadbeefdeadbeef.json").write_text(
+        json.dumps(other_event, sort_keys=True)
+    )
+
+    # Rebuild manifest
+    manifest = manifest_mod.rebuild(snapshot, event_log, config, host.host_id)
+
+    # gc - other host hasn't written purge, should refuse to delete blob
+    removed = lifecycle.gc(manifest, event_log, hub, blobs_dir, dry_run=False)
+    # Blob preserved (other host hasn't confirmed purge)
+    assert (blobs_dir / content_hash).exists()

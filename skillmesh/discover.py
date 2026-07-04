@@ -142,14 +142,26 @@ def extract_version(skill_dir: Path, format_name: str, format_filename: str) -> 
 # ============================ helpers ============================
 
 def _walk_with_exclude(root: Path, exclude_patterns):
-    """os.walk wrapper that prunes dirs matching exclude patterns."""
+    """os.walk wrapper that prunes dirs matching exclude patterns.
+
+    Match logic: a path matches if any exclude pattern is a path SEGMENT
+    of the full path (split by '/'). This prevents substring false positives
+    (e.g., 'skillmesh' excludes '.../skillmesh/...' but NOT
+    '.../my-skillmesh-notes/...').
+    """
     import os
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
         # Prune excluded dirs in-place
         kept = []
         for d in dirnames:
             full = os.path.join(dirpath, d)
-            if any(ex in full.replace(os.sep, "/") for ex in exclude_patterns):
+            full_normalized = full.replace(os.sep, "/")
+            segments = full_normalized.split("/")
+            if any(ex in segments for ex in exclude_patterns):
+                continue
+            # Also support patterns starting with / for path-relative matches
+            if any(ex.startswith("/") and ex[1:] in segments
+                   for ex in exclude_patterns):
                 continue
             if os.path.islink(full):
                 continue

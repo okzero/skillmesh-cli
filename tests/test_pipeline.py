@@ -7,7 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from skillmesh import discover, pipeline
+from skillmesh import cas, discover, pipeline
+from skillmesh import manifest as manifest_mod
 from skillmesh.config import Agent, Config, Format, Hub, Source, Watch
 from skillmesh.events import EventLog, SkillEntry
 from skillmesh.host import Host
@@ -149,6 +150,10 @@ def test_directory_layout_creates_symlink(tmp_path, monkeypatch):
     plan = pipeline.plan(disc, manifest, config)
     plan = pipeline.validate(plan, config, hub)
     pipeline.execute(plan, config, host, hub, event_log, dry_run=False)
+    # Reconcile to materialize + link (execute only writes blob + event)
+    snapshot = {"version": 1, "skills": {}, "tombstones": {}, "included_events": []}
+    manifest = manifest_mod.rebuild(snapshot, event_log, config, host.host_id)
+    pipeline.reconcile_skills(manifest, config, hub)
 
     # Check symlink
     link = fake_home / ".codex" / "skills" / "my-skill"
@@ -180,6 +185,10 @@ def test_file_layout_creates_file_symlink(tmp_path, monkeypatch):
     plan = pipeline.plan(disc, manifest, config)
     plan = pipeline.validate(plan, config, hub)
     pipeline.execute(plan, config, host, hub, event_log, dry_run=False)
+    # Reconcile to materialize + link
+    snapshot = {"version": 1, "skills": {}, "tombstones": {}, "included_events": []}
+    manifest = manifest_mod.rebuild(snapshot, event_log, config, host.host_id)
+    pipeline.reconcile_skills(manifest, config, hub)
 
     # Check cursor file symlink (target_filename = {skill}.mdc -> my-skill.mdc)
     link = fake_home / ".cursor" / "rules" / "my-skill.mdc"
@@ -328,6 +337,10 @@ def test_update_writes_new_blob_when_content_changes(tmp_path, monkeypatch):
     plan = pipeline.plan(disc, manifest, config)
     plan = pipeline.validate(plan, config, hub)
     pipeline.execute(plan, config, host, hub, event_log, dry_run=False)
+    # Reconcile to materialize
+    snapshot = {"version": 1, "skills": {}, "tombstones": {}, "included_events": []}
+    manifest = manifest_mod.rebuild(snapshot, event_log, config, host.host_id)
+    pipeline.reconcile_skills(manifest, config, hub)
 
     initial_blobs = list((hub / "blobs").iterdir())
     initial_events = event_log.read_all()
@@ -338,8 +351,6 @@ def test_update_writes_new_blob_when_content_changes(tmp_path, monkeypatch):
     (skill_dir / "SKILL.md").write_text("# v2 - changed")
 
     # Rebuild manifest with current state
-    from skillmesh import manifest as manifest_mod
-    snapshot = {"version": 1, "skills": {}, "tombstones": {}, "included_events": []}
     manifest = manifest_mod.rebuild(snapshot, event_log, config, host.host_id)
 
     # Second scan: should detect content change and write update
@@ -347,6 +358,9 @@ def test_update_writes_new_blob_when_content_changes(tmp_path, monkeypatch):
     plan = pipeline.plan(disc, manifest, config)
     plan = pipeline.validate(plan, config, hub)
     pipeline.execute(plan, config, host, hub, event_log, dry_run=False)
+    # Reconcile to materialize the update
+    manifest = manifest_mod.rebuild(snapshot, event_log, config, host.host_id)
+    pipeline.reconcile_skills(manifest, config, hub)
 
     events = event_log.read_all()
     ops = [e.op for e in events]
@@ -389,3 +403,77 @@ def test_link_removes_symlink_only(tmp_path):
     pipeline._safe_remove_link(link)
     assert not link.exists()
     assert target.exists()  # target preserved
+
+
+def test_reconcile_keeps_old_on_mixed_conflict(tmp_path, monkeypatch):
+    """B2: on MIXED-VERSION-CONFLICT, reconcile keeps manifest's winner (old),
+    not the newly-written blob.
+    """
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    src_dir = fake_home / "skills-source"
+    src_dir.mkdir()
+
+    # Initial skill with version 1.0.0 (frontmatter)
+    skill_dir = src_dir / "my-skill"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text("---\nversion: 1.0.0\n---\n# v1.0.0\n")
+
+    hub = tmp_path / "hub"
+    hub.mkdir()
+    (hub / "skills").mkdir()
+    (hub / "blobs").mkdir()
+    (hub / "events").mkdir()
+
+    config = Config(
+        hub=Hub(path=str(hub)),
+        agents=[Agent(name="codex", dir="~/.codex/skills",
+                      accept_sources=["work"], layout="directory")],
+        sources=[Source(label="work", prefix="~/skills-source")],
+        formats=[Format(name="skill-md", filename="SKILL.md")],
+        watch=Watch(dirs=["~/skills-source"], exclude=[]),
+    )
+    host = Host(host_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", display_name="test")
+    event_log = EventLog(hub / "events", host)
+
+    # First add (with version 1.0.0)
+    disc = discover.discover(config)
+    manifest = Manifest()
+    plan = pipeline.plan(disc, manifest, config)
+    pipeline.execute(plan, config, host, hub, event_log, dry_run=False)
+    snapshot = {"version": 1, "skills": {}, "tombstones": {}, "included_events": []}
+    manifest = manifest_mod.rebuild(snapshot, event_log, config, host.host_id)
+    pipeline.reconcile_skills(manifest, config, hub)
+
+    # Capture original content_hash (the v1.0.0 one)
+    original_hash = manifest.skills["my-skill"].content_hash
+    assert original_hash
+
+    # Now modify skill to remove version (simulate mixed conflict)
+    (skill_dir / "SKILL.md").write_text("# no version content")
+
+    # Rebuild manifest with current state (still has v1.0.0 from before)
+    manifest = manifest_mod.rebuild(snapshot, event_log, config, host.host_id)
+
+    # Re-scan: writes update event (new blob without version)
+    disc = discover.discover(config)
+    plan = pipeline.plan(disc, manifest, config)
+    pipeline.execute(plan, config, host, hub, event_log, dry_run=False)
+
+    # Rebuild manifest - should record MIXED-VERSION-CONFLICT, keep old
+    manifest = manifest_mod.rebuild(snapshot, event_log, config, host.host_id)
+    assert "my-skill" in manifest.conflicts
+    assert manifest.conflicts["my-skill"].type == "MIXED-VERSION-CONFLICT"
+    # Manifest keeps the OLD content_hash (with version)
+    assert manifest.skills["my-skill"].content_hash == original_hash
+
+    # Reconcile: should materialize the OLD content (manifest's winner),
+    # NOT the newly-written blob
+    pipeline.reconcile_skills(manifest, config, hub)
+
+    # Verify skills/my-skill/SKILL.md has OLD content
+    materialized = hub / "skills" / "my-skill" / "SKILL.md"
+    assert materialized.exists()
+    assert "v1.0.0" in materialized.read_text()
+    assert "no version content" not in materialized.read_text()

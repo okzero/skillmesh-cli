@@ -29,6 +29,11 @@ SKILL_NAME_RE = re.compile(r"^[a-zA-Z0-9._-]+$")
 LAYOUTS_V1 = {"directory", "file"}
 
 
+class ConfigError(Exception):
+    """Raised on config loading or validation errors."""
+    pass
+
+
 @dataclass
 class Source:
     label: str
@@ -124,16 +129,30 @@ class Config:
         names = [a.name for a in self.agents]
         if len(names) != len(set(names)):
             raise ConfigError(f"duplicate agent names: {names}")
+        # M5: detect file-layout agents with same dir + target_filename
+        # (would cause skills to overwrite each other's symlinks)
+        file_targets = []
+        for a in self.agents:
+            if a.layout == "file" and a.target_filename:
+                file_targets.append((a.dir, a.target_filename))
+        if len(file_targets) != len(set(file_targets)):
+            # Find duplicates for clearer error
+            seen = {}
+            for d, t in file_targets:
+                key = (d, t)
+                if key in seen:
+                    raise ConfigError(
+                        f"duplicate file-layout agent target: dir={d} "
+                        f"target_filename={t}. Multiple agents writing to "
+                        f"same path will overwrite each other."
+                    )
+                seen[key] = True
 
     def resolve_hub_path(self) -> Path:
         return _expand_path(self.hub.path)
 
     def resolve_agent_dir(self, agent: Agent) -> Path:
         return _expand_path(agent.dir)
-
-
-class ConfigError(Exception):
-    pass
 
 
 def _expand_path(raw: str) -> Path:

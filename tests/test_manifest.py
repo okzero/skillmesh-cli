@@ -218,6 +218,72 @@ def test_subsequent_add_resolves_conflict(tmp_path):
     assert manifest.skills["skill-x"].content_hash == "sha256:v3"
 
 
+def test_mixed_conflict_persists_across_rebuilds(tmp_path):
+    """B2: mixed conflict stays recorded across multiple rebuilds (no auto-resolve)."""
+    host = _make_host()
+    events_dir = tmp_path / "events"
+    events_dir.mkdir()
+    event_log = EventLog(events_dir, host)
+
+    event_log.write("add", _make_entry("skill-x", version="1.0.0",
+                                       content_hash="sha256:with-ver"))
+    event_log.write("update", _make_entry("skill-x", version="",
+                                          content_hash="sha256:no-ver"))
+
+    snapshot = {"version": 1, "skills": {}, "tombstones": {}, "included_events": []}
+    config = _make_config(tmp_path)
+
+    # First rebuild
+    m1 = manifest_mod.rebuild(snapshot, event_log, config, host.host_id)
+    assert "skill-x" in m1.conflicts
+
+    # Second rebuild - conflict should still be there
+    m2 = manifest_mod.rebuild(snapshot, event_log, config, host.host_id)
+    assert "skill-x" in m2.conflicts
+    assert m2.conflicts["skill-x"].type == "MIXED-VERSION-CONFLICT"
+    # Existing (with version) is kept
+    assert m2.skills["skill-x"].content_hash == "sha256:with-ver"
+
+
+def test_snapshot_preserves_conflicts(tmp_path):
+    """Compact/snapshot should preserve conflicts so they survive across machines."""
+    host = _make_host()
+    events_dir = tmp_path / "events"
+    events_dir.mkdir()
+    event_log = EventLog(events_dir, host)
+
+    event_log.write("add", _make_entry("skill-x", version="1.0.0",
+                                       content_hash="sha256:v1"))
+    event_log.write("update", _make_entry("skill-x", version="",
+                                          content_hash="sha256:v2"))
+
+    snapshot = {"version": 1, "skills": {}, "tombstones": {}, "included_events": []}
+    config = _make_config(tmp_path)
+
+    manifest = manifest_mod.rebuild(snapshot, event_log, config, host.host_id)
+
+    # Build a compacted snapshot (mimics cli._cmd_compact)
+    import hashlib, json
+    new_snapshot = {
+        "version": 1,
+        "skills": {k: v.to_dict() for k, v in manifest.skills.items()},
+        "tombstones": {k: v.to_dict() for k, v in manifest.tombstones.items()},
+        "conflicts": {k: v.to_dict() for k, v in manifest.conflicts.items()},
+        "included_events": [e.id for e in event_log.read_all()],
+    }
+    content = json.dumps(
+        {k: v for k, v in new_snapshot.items() if k != "content_hash"},
+        sort_keys=True,
+    )
+    new_snapshot["content_hash"] = f"sha256:{hashlib.sha256(content.encode()).hexdigest()}"
+
+    # Rebuild from compacted snapshot (no events to apply - all folded)
+    rebuilt = manifest_mod.rebuild(new_snapshot, event_log, config, host.host_id)
+    # Conflict preserved
+    assert "skill-x" in rebuilt.conflicts
+    assert rebuilt.conflicts["skill-x"].type == "MIXED-VERSION-CONFLICT"
+
+
 def test_uninstall_then_add_skips(tmp_path):
     """uninstall then later add event is skipped (skill is isolated)."""
     host = _make_host()

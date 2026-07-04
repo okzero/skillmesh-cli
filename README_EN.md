@@ -47,7 +47,7 @@ Each agent has its own skill storage location and filename convention. Once a sk
 | Peer-write concurrency (both machines edit) | ❌ | ⚠️ (via git merge) | ⚠️ (via git merge) | ✅ |
 | CAS blob storage | ❌ | ❌ | ❌ | ✅ |
 | Complete lifecycle state machine | ❌ | ❌ | ❌ | ✅ |
-| Single-script auditable (no build toolchain) | ❌ (cargo) | ❌ (tsc/npm) | ❌ (go build) | ✅ |
+| Source auditable (no build toolchain) | ❌ (cargo) | ❌ (tsc/npm) | ❌ (go build) | ✅ |
 
 Each has its strengths. See `docs/PRD.md` §5.4 for detailed comparison.
 

@@ -206,40 +206,135 @@ def purge(name: str, manifest: Manifest, event_log: EventLog,
 
 def gc(manifest: Manifest, event_log: EventLog, hub_path: Path,
        blobs_dir: Path, dry_run: bool = False) -> int:
-    """Garbage collect purged skills' blobs. Returns count of blobs removed.
+    """Garbage collect unreferenced + purged blobs.
 
-    Three phases (see docs/ARCHITECTURE.md §8.3):
-    gc_prepare -> delete -> gc
+    Three-phase cross-machine protection (PRD §8.3, ARCHITECTURE §8.3):
 
-    Cross-machine sync protection: only GC blobs that no skill references.
+    Phase 1 (purge, already done by `purge` command):
+        tombstone state="purging", event "purge" written.
+
+    Phase 2 (gc, this function):
+        For each purging skill, check ALL known hosts have written a "purge"
+        event for it. If yes, delete blob + write "gc" event (removes from
+        manifest.skills). If no, skip (wait for cross-machine sync).
+
+        Also delete truly unreferenced blobs (no skill in manifest references
+        them) - these are safe orphans from failed operations.
+
+    Phase 3 (gc event propagation):
+        The "gc" event propagates to other machines via sync. They rebuild
+        manifest, see skill removed, and their next gc can clean up too.
+
+    Cross-machine safety:
+        - We only delete a purging skill's blob if ALL known host_dirs have
+          a "purge" event for that skill. "Known hosts" = subdirs under
+          events/ (each host writes its own event_dir).
+        - This prevents deleting a blob that another machine still references
+          (e.g., A purges + gcs, but B hasn't received purge event yet).
+
+    See docs/PRD.md §9.5 F5.6, docs/ARCHITECTURE.md §8.3.
     """
-    # Find all referenced content_hashes
-    referenced = set()
-    for entry in manifest.skills.values():
-        if entry.content_hash:
-            referenced.add(entry.content_hash)
-
-    removed = 0
     if not blobs_dir.exists():
         return 0
 
+    events_dir = hub_path / "events"
+    known_hosts = _list_known_hosts(events_dir)
+
+    # Build referenced set: all skills EXCEPT purging ones (their blobs
+    # are eligible for deletion after cross-machine confirmation).
+    referenced = set()
+    purging_skills = []  # (name, entry) candidates for blob deletion
+
+    for name, entry in manifest.skills.items():
+        tomb = manifest.tombstones.get(name)
+        if tomb and tomb.state == "purging":
+            # Check if all known hosts have written "purge" for this skill
+            if _all_hosts_confirmed_purge(events_dir, known_hosts, name):
+                purging_skills.append((name, entry))
+                # Don't add to referenced - blob can be deleted
+            else:
+                # Not all hosts confirmed yet - keep blob, skip deletion
+                # Add to referenced to protect it
+                if entry.content_hash:
+                    referenced.add(entry.content_hash)
+        else:
+            # Active / detached / uninstalled - all keep their blobs
+            # (uninstalled is recoverable via forget, needs blob)
+            if entry.content_hash:
+                referenced.add(entry.content_hash)
+
+    removed = 0
+
+    # Phase A: delete truly unreferenced blobs (orphans from failed ops)
     for blob_dir in blobs_dir.iterdir():
-        if not blob_dir.is_dir():
+        if not blob_dir.is_dir() or blob_dir.name.startswith("."):
             continue
-        if blob_dir.name.startswith("."):
+        if blob_dir.name in referenced:
             continue
-        content_hash = blob_dir.name
-        if content_hash in referenced:
-            continue
-        # Also check tombstoned skills (still referenced until gc event written)
-        # For v1 skeleton: simple check, conservative
         if dry_run:
-            print(f"would remove blob: {content_hash}")
+            print(f"would remove orphan blob: {blob_dir.name}")
         else:
             shutil.rmtree(blob_dir)
         removed += 1
 
+    # Phase B: delete purging skills' blobs (cross-machine confirmed)
+    # and write "gc" event to remove from manifest
+    for name, entry in purging_skills:
+        if not entry.content_hash:
+            continue
+        blob_dir = blobs_dir / entry.content_hash
+        if blob_dir.exists():
+            if dry_run:
+                print(f"would remove purged blob: {entry.content_hash}")
+            else:
+                shutil.rmtree(blob_dir)
+            removed += 1
+        # Write gc event to remove skill from manifest
+        if not dry_run:
+            event_log.write("gc", entry)
+
     return removed
+
+
+def _list_known_hosts(events_dir: Path) -> set:
+    """Get set of host_dir names (each is <hostname>-<uuid8>)."""
+    if not events_dir.exists():
+        return set()
+    return {
+        d.name for d in events_dir.iterdir()
+        if d.is_dir() and not d.name.startswith(".")
+    }
+
+
+def _all_hosts_confirmed_purge(events_dir: Path, known_hosts: set,
+                                skill_name: str) -> bool:
+    """Check that every known host has written a "purge" event for skill_name.
+
+    Reads each host_dir's events and looks for any event with op="purge"
+    and skill.name == skill_name.
+    """
+    if not known_hosts:
+        # No hosts known yet - be conservative, don't delete
+        return False
+
+    import json
+    for host_dir_name in known_hosts:
+        host_dir = events_dir / host_dir_name
+        if not host_dir.exists():
+            continue
+        found_purge = False
+        for event_file in host_dir.glob("*.json"):
+            try:
+                data = json.loads(event_file.read_text())
+                if (data.get("op") == "purge"
+                        and data.get("skill", {}).get("name") == skill_name):
+                    found_purge = True
+                    break
+            except (json.JSONDecodeError, KeyError):
+                continue
+        if not found_purge:
+            return False  # this host hasn't purged yet
+    return True
 
 
 # ============================ path safety ============================

@@ -1,4 +1,4 @@
-"""Platform daemon: launchd (macOS) and systemd (Linux) generation.
+"""Platform daemon: launchd, systemd, and Windows Task Scheduler.
 
 Generates:
 - macOS: ~/Library/LaunchAgents/com.skillmesh.watch.plist
@@ -17,6 +17,8 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+from .platform_support import FileLock, logs_dir as platform_logs_dir, state_dir
+
 
 class DaemonError(Exception):
     pass
@@ -29,10 +31,12 @@ def install_daemon(script_path: Path, interval: int = 60) -> str:
         return _install_launchd(script_path, interval)
     elif system == "Linux":
         return _install_systemd(script_path, interval)
+    elif system == "Windows":
+        return _install_windows_task(script_path, interval)
     else:
         raise DaemonError(
             f"unsupported platform: {system}. "
-            f"v1 supports macOS and Linux only (Windows is v2)."
+            f"Supported platforms: macOS, Linux, Windows."
         )
 
 
@@ -42,17 +46,15 @@ def uninstall_daemon() -> None:
         _uninstall_launchd()
     elif system == "Linux":
         _uninstall_systemd()
+    elif system == "Windows":
+        _uninstall_windows_task()
     else:
         raise DaemonError(f"unsupported platform: {system}")
 
 
 def logs_dir() -> Path:
     """Platform-specific logs directory."""
-    system = platform.system()
-    if system == "Darwin":
-        return Path("~/Library/Logs/skillmesh").expanduser()
-    else:
-        return Path("~/.local/state/skillmesh/logs").expanduser()
+    return platform_logs_dir()
 
 
 # ============================ launchd ============================
@@ -79,7 +81,7 @@ def _install_launchd(script_path: Path, interval: int) -> str:
   <array>
     <string>{python_bin}</string>
     <string>{script_path}</string>
-    <string>scan</string>
+    <string>daemon-run</string>
   </array>
   <key>StartInterval</key>
   <integer>{interval}</integer>
@@ -141,7 +143,7 @@ Description=Skillmesh watch daemon
 
 [Service]
 Type=oneshot
-ExecStart={python_bin} {script_path} scan
+ExecStart={python_bin} {script_path} daemon-run
 StandardOutput=append:{log_dir}/daemon.log
 StandardError=append:{log_dir}/daemon.err
 """
@@ -197,16 +199,39 @@ def _uninstall_systemd() -> None:
     )
 
 
-def acquire_lock() -> int:
-    """Acquire daemon lock to prevent concurrent runs. Returns fd (keep open)."""
-    import fcntl
-    lock_dir = Path("~/.local/state/skillmesh").expanduser()
-    lock_dir.mkdir(parents=True, exist_ok=True)
-    lock_file = lock_dir / "daemon.lock"
-    fd = os.open(str(lock_file), os.O_CREAT | os.O_RDWR, 0o644)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        os.close(fd)
-        raise DaemonError("another skillmesh daemon is running")
-    return fd
+# ============================ Windows Task Scheduler ============================
+
+WINDOWS_TASK_NAME = "SkillmeshWatch"
+
+
+def _install_windows_task(script_path: Path, interval: int) -> str:
+    if interval < 60 or interval % 60 != 0:
+        raise DaemonError(
+            "Windows Task Scheduler interval must be a whole number of minutes"
+        )
+    task_command = subprocess.list2cmdline(
+        [sys.executable, str(script_path), "daemon-run"]
+    )
+    result = subprocess.run(
+        ["schtasks.exe", "/Create", "/TN", WINDOWS_TASK_NAME,
+         "/TR", task_command, "/SC", "MINUTE", "/MO", str(interval // 60),
+         "/RL", "LIMITED", "/F"], capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        raise DaemonError(f"Task Scheduler create failed: {result.stderr.strip()}")
+    subprocess.run(
+        ["schtasks.exe", "/Run", "/TN", WINDOWS_TASK_NAME], capture_output=True,
+    )
+    return WINDOWS_TASK_NAME
+
+
+def _uninstall_windows_task() -> None:
+    subprocess.run(
+        ["schtasks.exe", "/Delete", "/TN", WINDOWS_TASK_NAME, "/F"],
+        capture_output=True,
+    )
+
+
+def acquire_lock() -> FileLock:
+    """Return a portable non-blocking daemon lock context manager."""
+    return FileLock(state_dir() / "daemon.lock", blocking=False)

@@ -19,6 +19,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
 
+from . import distribution
+from .platform_support import atomic_replace, is_safe_portable_name
+
 
 EXCLUDED_FILES = {".DS_Store", "Thumbs.db", "__pycache__", ".skillmesh.lock",
                   ".skillmesh-owned"}
@@ -42,6 +45,36 @@ class BlobMeta:
     @classmethod
     def from_dict(cls, data: dict) -> "BlobMeta":
         return cls(**data)
+
+
+def blob_path(blobs_dir: Path, content_hash: str, legacy_fallback: bool = True) -> Path:
+    """Map a logical hash to a Windows-portable CAS directory name."""
+    portable = blobs_dir / content_hash.replace(":", "-")
+    legacy = blobs_dir / content_hash
+    if legacy_fallback and not portable.exists() and legacy.exists():
+        return legacy
+    return portable
+
+
+def migrate_legacy_blob_names(blobs_dir: Path) -> int:
+    """Rename pre-0.2 colon CAS directories to portable hyphen names."""
+    if not blobs_dir.exists():
+        return 0
+    migrated = 0
+    for legacy in blobs_dir.iterdir():
+        if not legacy.is_dir() or not legacy.name.startswith("sha256:"):
+            continue
+        portable = blobs_dir / legacy.name.replace(":", "-")
+        if portable.exists():
+            continue
+        try:
+            atomic_replace(legacy, portable)
+            migrated += 1
+        except FileNotFoundError:
+            # Another process may have completed the same migration.
+            if not portable.exists():
+                raise
+    return migrated
 
 
 def compute_content_hash(
@@ -109,7 +142,7 @@ def write_blob(
     Idempotent: if blob already exists, returns immediately.
     """
     content_hash = compute_content_hash(skill_dir, skill_name, format_name, version)
-    blob_dir = blobs_dir / content_hash
+    blob_dir = blob_path(blobs_dir, content_hash)
     if blob_dir.exists():
         return content_hash  # CAS hit
 
@@ -130,7 +163,15 @@ def write_blob(
         (tmp_dir / ".meta.json").write_text(
             json.dumps(meta.to_dict(), sort_keys=True)
         )
-        os.rename(tmp_dir, blob_dir)
+        try:
+            atomic_replace(tmp_dir, blob_dir)
+        except OSError:
+            # Another writer may have won the same immutable CAS address.
+            # Treat it as an idempotent hit only after validating identity.
+            existing = read_meta(content_hash, blobs_dir)
+            if existing is None or existing.content_hash != content_hash:
+                raise
+            shutil.rmtree(tmp_dir, ignore_errors=True)
         return content_hash
     except Exception:
         shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -143,7 +184,7 @@ def materialize(content_hash: str, skill_name: str, skills_dir: Path,
 
     Overwrites existing symlink or empty dir at target.
     """
-    blob_dir = blobs_dir / content_hash
+    blob_dir = blob_path(blobs_dir, content_hash)
     if not blob_dir.exists():
         raise FileNotFoundError(f"blob not found: {content_hash}")
 
@@ -158,7 +199,7 @@ def materialize(content_hash: str, skill_name: str, skills_dir: Path,
 
 
 def read_meta(content_hash: str, blobs_dir: Path) -> Optional[BlobMeta]:
-    meta_path = blobs_dir / content_hash / ".meta.json"
+    meta_path = blob_path(blobs_dir, content_hash) / ".meta.json"
     if not meta_path.exists():
         return None
     return BlobMeta.from_dict(json.loads(meta_path.read_text()))
@@ -168,7 +209,7 @@ def is_orphan_blob(content_hash: str, skills_dir: Path, blobs_dir: Path) -> bool
     """Check if blob is unreferenced (no skill materialized from it)."""
     # NOTE: this is a heuristic; true orphan check requires scanning manifest.
     # Used by gc to find candidates. See lifecycle.py for full gc logic.
-    blob_dir = blobs_dir / content_hash
+    blob_dir = blob_path(blobs_dir, content_hash)
     if not blob_dir.exists():
         return False
     meta = read_meta(content_hash, blobs_dir)
@@ -193,7 +234,15 @@ def _list_normalized_files(root: Path) -> List[str]:
             continue
         if name.startswith(".tmp."):
             continue
-        result.append(p.relative_to(root).as_posix())
+        relative = p.relative_to(root)
+        invalid = [part for part in relative.parts
+                   if not is_safe_portable_name(part)]
+        if invalid:
+            raise ValueError(
+                f"non-portable skill path component {invalid[0]!r} in "
+                f"{relative.as_posix()}"
+            )
+        result.append(relative.as_posix())
     return sorted(result)
 
 
@@ -249,6 +298,9 @@ def _safe_remove(target: Path) -> None:
     """
     if target.is_symlink():
         target.unlink()
+        return
+    if distribution.is_junction(target):
+        os.rmdir(target)
         return
     if not target.exists():
         return

@@ -340,9 +340,12 @@ def test_manifest_save_only_when_fingerprint_changes(tmp_path):
     assert manifest_path.exists()
     mtime1 = manifest_path.stat().st_mtime_ns
 
-    # Second save with no changes - should not rewrite
-    manifest2 = manifest_mod.rebuild(snapshot, event_log, config, host.host_id)
-    manifest_mod.save(manifest2, manifest_path)
+    # Repeated empty saves with no changes must not rewrite.
+    for _ in range(1000):
+        manifest2 = manifest_mod.rebuild(
+            snapshot, event_log, config, host.host_id
+        )
+        manifest_mod.save(manifest2, manifest_path)
     mtime2 = manifest_path.stat().st_mtime_ns
 
     assert mtime1 == mtime2  # not rewritten

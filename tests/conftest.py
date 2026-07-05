@@ -13,18 +13,45 @@ from pathlib import Path
 import pytest
 
 
+def symlink_or_skip(source, target, *, target_is_directory=False) -> None:
+    """Create a test symlink, skipping only Windows privilege failures."""
+    try:
+        os.symlink(source, target, target_is_directory=target_is_directory)
+    except OSError as exc:
+        if os.name == "nt" and getattr(exc, "winerror", None) in {5, 1314}:
+            pytest.skip("Windows runner does not grant symlink privileges")
+        raise
+
+
+def set_test_home(monkeypatch, path: Path) -> None:
+    """Set both POSIX and Windows home variables for native CI isolation."""
+    monkeypatch.setenv("HOME", str(path))
+    monkeypatch.setenv("USERPROFILE", str(path))
+
+
+@pytest.fixture(autouse=True)
+def isolate_platform_state(tmp_path, monkeypatch):
+    """Keep platform-specific config/state out of the real user profile."""
+    test_home = tmp_path / "platform-home"
+    test_home.mkdir()
+    set_test_home(monkeypatch, test_home)
+    monkeypatch.setenv("SKILLMESH_CONFIG_DIR", str(tmp_path / "platform-config"))
+    monkeypatch.setenv("SKILLMESH_STATE_DIR", str(tmp_path / "platform-state"))
+
+
 @pytest.fixture
 def isolated_env(tmp_path, monkeypatch):
     """Spawn an isolated skillmesh environment with fake HOME."""
     fake_home = tmp_path / "home"
     fake_home.mkdir()
-    monkeypatch.setenv("HOME", str(fake_home))
+    set_test_home(monkeypatch, fake_home)
     monkeypatch.delenv("SKILLMESH_HOST_ID", raising=False)
     monkeypatch.delenv("SKILLMESH_CONFIG", raising=False)
     monkeypatch.delenv("SKILLMESH_HOST_FILE", raising=False)
 
     config_dir = fake_home / ".config" / "skillmesh"
     config_dir.mkdir(parents=True)
+    monkeypatch.setenv("SKILLMESH_CONFIG_DIR", str(config_dir))
 
     hub_dir = fake_home / "hub"
     hub_dir.mkdir()
@@ -131,8 +158,9 @@ def _make_env(root: Path, monkeypatch, host_id: str) -> SkillmeshEnv:
 
 def activate(env: SkillmeshEnv, monkeypatch) -> None:
     """Switch monkeypatch to use the given env's HOME and host_id."""
-    monkeypatch.setenv("HOME", str(env.home))
+    set_test_home(monkeypatch, env.home)
     monkeypatch.setenv("SKILLMESH_HOST_ID", env._host_id)
+    monkeypatch.setenv("SKILLMESH_CONFIG_DIR", str(env.config_dir))
 
 
 def _minimal_toml_config(hub_dir: Path) -> str:

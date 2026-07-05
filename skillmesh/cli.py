@@ -6,6 +6,7 @@ All write commands support --dry-run.
 purge requires --yes (not --dry-run).
 """
 import argparse
+import contextlib
 import json
 import os
 import sys
@@ -23,6 +24,7 @@ from . import (
     manifest as manifest_mod,
     pipeline,
     platform_daemon,
+    platform_support,
     status as status_mod,
 )
 
@@ -51,7 +53,7 @@ def _build_parser() -> argparse.ArgumentParser:
         description="Multi-agent, multi-machine skill sync via any cloud drive.",
     )
     parser.add_argument("--config", help="config file path (TOML or JSON)")
-    parser.add_argument("--version", action="version", version="skillmesh 0.1.0")
+    parser.add_argument("--version", action="version", version="skillmesh 0.2.0")
 
     sub = parser.add_subparsers(dest="command")
 
@@ -114,8 +116,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p_rollback.add_argument("backup_dir", nargs="?", help="backup dir (default: latest)")
 
     # install_daemon / uninstall_daemon
-    sub.add_parser("install_daemon", help="install launchd/systemd daemon")
+    sub.add_parser("install_daemon", help="install platform daemon")
     sub.add_parser("uninstall_daemon", help="uninstall daemon")
+    sub.add_parser("daemon-run", help=argparse.SUPPRESS)
 
     return parser
 
@@ -130,7 +133,9 @@ def _dispatch(args) -> int:
     config = config_mod.load_config(getattr(args, "config", None))
     host = host_mod.load_or_create_host()
     hub_path = config.resolve_hub_path()
-    hub_path.mkdir(parents=True, exist_ok=True)
+    dry_run = bool(getattr(args, "dry_run", False))
+    if not dry_run:
+        hub_path.mkdir(parents=True, exist_ok=True)
 
     if cmd == "scan":
         return _cmd_scan(args, config, host, hub_path)
@@ -164,6 +169,8 @@ def _dispatch(args) -> int:
         return _cmd_install_daemon(args, config, host, hub_path)
     elif cmd == "uninstall_daemon":
         return _cmd_uninstall_daemon(args)
+    elif cmd == "daemon-run":
+        return _cmd_daemon_run(args, config, host, hub_path)
     else:
         print(f"unknown command: {cmd}", file=sys.stderr)
         return 1
@@ -189,8 +196,25 @@ def _cmd_init(args) -> int:
     if dst.exists():
         print(f"config already exists: {dst}")
     else:
-        import shutil
-        shutil.copy(src, dst)
+        content = src.read_text(encoding="utf-8")
+        if platform_support.system_name() == "Windows":
+            if dst.suffix == ".json":
+                template = json.loads(content)
+                template["hub"]["path"] = "%USERPROFILE%/skillmesh-hub"
+                template["hub"]["sync_backend"] = "manual"
+                template["backup"]["path"] = (
+                    "%LOCALAPPDATA%/skillmesh/backups"
+                )
+                content = json.dumps(template, indent=2, ensure_ascii=False) + "\n"
+            else:
+                content = content.replace(
+                    "~/Library/Mobile Documents/com~apple~CloudDocs/skillmesh",
+                    "%USERPROFILE%/skillmesh-hub",
+                ).replace(
+                    "~/.local/state/skillmesh/backups",
+                    "%LOCALAPPDATA%/skillmesh/backups",
+                ).replace('sync_backend = "icloud"', 'sync_backend = "manual"')
+        dst.write_text(content, encoding="utf-8")
         print(f"created config: {dst}")
         print("Edit it to match your setup, then run `skillmesh scan`.")
 
@@ -212,19 +236,27 @@ def _cmd_scan(args, config, host, hub_path) -> int:
     manifest_path = hub_path / "manifest.json"
     snapshot_path = hub_path / "snapshot.json"
 
-    blobs_dir.mkdir(parents=True, exist_ok=True)
-    skills_dir.mkdir(parents=True, exist_ok=True)
-    events_dir.mkdir(parents=True, exist_ok=True)
+    if not dry_run:
+        blobs_dir.mkdir(parents=True, exist_ok=True)
+    migrated_blobs = (
+        cas.migrate_legacy_blob_names(blobs_dir) if not dry_run else 0
+    )
+    if migrated_blobs:
+        print(f"migrated: {migrated_blobs} legacy blob path(s)")
+    if not dry_run:
+        skills_dir.mkdir(parents=True, exist_ok=True)
+        events_dir.mkdir(parents=True, exist_ok=True)
 
     # Load or create snapshot
-    snapshot = _load_or_init_snapshot(snapshot_path, host)
+    snapshot = _load_or_init_snapshot(snapshot_path, host, persist=not dry_run)
 
     # Load event log
     event_log = events.EventLog(events_dir, host)
 
     # Load manifest (rebuild if needed)
     manifest = manifest_mod.load_or_rebuild(
-        manifest_path, snapshot, event_log, config, host.host_id
+        manifest_path, snapshot, event_log, config, host.host_id,
+        repair=not dry_run,
     )
 
     # Discover
@@ -272,10 +304,11 @@ def _cmd_apply(args, config, host, hub_path) -> int:
     manifest_path = hub_path / "manifest.json"
     snapshot_path = hub_path / "snapshot.json"
 
-    snapshot = _load_or_init_snapshot(snapshot_path, host)
+    snapshot = _load_or_init_snapshot(snapshot_path, host, persist=not dry_run)
     event_log = events.EventLog(events_dir, host)
     manifest = manifest_mod.load_or_rebuild(
-        manifest_path, snapshot, event_log, config, host.host_id
+        manifest_path, snapshot, event_log, config, host.host_id,
+        repair=not dry_run,
     )
 
     from .pipeline import _apply_links
@@ -340,15 +373,17 @@ def _cmd_invariants(args, config, host, hub_path) -> int:
 
 
 def _cmd_detach(args, config, host, hub_path) -> int:
+    dry_run = bool(args.dry_run)
     events_dir = hub_path / "events"
     manifest_path = hub_path / "manifest.json"
     snapshot_path = hub_path / "snapshot.json"
     skills_dir = hub_path / "skills"
 
-    snapshot = _load_or_init_snapshot(snapshot_path, host)
+    snapshot = _load_or_init_snapshot(snapshot_path, host, persist=not dry_run)
     event_log = events.EventLog(events_dir, host)
     manifest = manifest_mod.load_or_rebuild(
-        manifest_path, snapshot, event_log, config, host.host_id
+        manifest_path, snapshot, event_log, config, host.host_id,
+        repair=not dry_run,
     )
 
     if args.dry_run:
@@ -363,15 +398,17 @@ def _cmd_detach(args, config, host, hub_path) -> int:
 
 
 def _cmd_attach(args, config, host, hub_path) -> int:
+    dry_run = bool(args.dry_run)
     events_dir = hub_path / "events"
     manifest_path = hub_path / "manifest.json"
     snapshot_path = hub_path / "snapshot.json"
     skills_dir = hub_path / "skills"
 
-    snapshot = _load_or_init_snapshot(snapshot_path, host)
+    snapshot = _load_or_init_snapshot(snapshot_path, host, persist=not dry_run)
     event_log = events.EventLog(events_dir, host)
     manifest = manifest_mod.load_or_rebuild(
-        manifest_path, snapshot, event_log, config, host.host_id
+        manifest_path, snapshot, event_log, config, host.host_id,
+        repair=not dry_run,
     )
 
     if args.dry_run:
@@ -386,14 +423,16 @@ def _cmd_attach(args, config, host, hub_path) -> int:
 
 
 def _cmd_uninstall(args, config, host, hub_path) -> int:
+    dry_run = bool(args.dry_run)
     events_dir = hub_path / "events"
     manifest_path = hub_path / "manifest.json"
     snapshot_path = hub_path / "snapshot.json"
 
-    snapshot = _load_or_init_snapshot(snapshot_path, host)
+    snapshot = _load_or_init_snapshot(snapshot_path, host, persist=not dry_run)
     event_log = events.EventLog(events_dir, host)
     manifest = manifest_mod.load_or_rebuild(
-        manifest_path, snapshot, event_log, config, host.host_id
+        manifest_path, snapshot, event_log, config, host.host_id,
+        repair=not dry_run,
     )
 
     if args.dry_run:
@@ -408,15 +447,17 @@ def _cmd_uninstall(args, config, host, hub_path) -> int:
 
 
 def _cmd_forget(args, config, host, hub_path) -> int:
+    dry_run = bool(args.dry_run)
     events_dir = hub_path / "events"
     manifest_path = hub_path / "manifest.json"
     snapshot_path = hub_path / "snapshot.json"
     skills_dir = hub_path / "skills"
 
-    snapshot = _load_or_init_snapshot(snapshot_path, host)
+    snapshot = _load_or_init_snapshot(snapshot_path, host, persist=not dry_run)
     event_log = events.EventLog(events_dir, host)
     manifest = manifest_mod.load_or_rebuild(
-        manifest_path, snapshot, event_log, config, host.host_id
+        manifest_path, snapshot, event_log, config, host.host_id,
+        repair=not dry_run,
     )
 
     if args.dry_run:
@@ -450,22 +491,24 @@ def _cmd_purge(args, config, host, hub_path) -> int:
 
 
 def _cmd_gc(args, config, host, hub_path) -> int:
+    dry_run = bool(getattr(args, "dry_run", False))
     events_dir = hub_path / "events"
     manifest_path = hub_path / "manifest.json"
     snapshot_path = hub_path / "snapshot.json"
     blobs_dir = hub_path / "blobs"
 
-    snapshot = _load_or_init_snapshot(snapshot_path, host)
+    snapshot = _load_or_init_snapshot(snapshot_path, host, persist=not dry_run)
     event_log = events.EventLog(events_dir, host)
     manifest = manifest_mod.load_or_rebuild(
-        manifest_path, snapshot, event_log, config, host.host_id
+        manifest_path, snapshot, event_log, config, host.host_id,
+        repair=not dry_run,
     )
 
     removed = lifecycle.gc(
         manifest, event_log, hub_path, blobs_dir,
-        dry_run=getattr(args, "dry_run", False),
+        dry_run=dry_run,
     )
-    if getattr(args, "dry_run", False):
+    if dry_run:
         print(f"gc would remove: {removed} blob(s)")
     else:
         print(f"gc removed: {removed} blob(s)")
@@ -509,7 +552,7 @@ def _cmd_compact(args, config, host, hub_path) -> int:
     # Atomic write snapshot
     tmp = snapshot_path.with_suffix(".tmp")
     tmp.write_text(json.dumps(new_snapshot, sort_keys=True, ensure_ascii=False))
-    os.rename(tmp, snapshot_path)
+    platform_support.atomic_replace(tmp, snapshot_path)
 
     # M5: force rebuild + save manifest after compact
     manifest = manifest_mod.rebuild(new_snapshot, event_log, config, host.host_id)
@@ -529,13 +572,14 @@ def _cmd_backup(args, config, host, hub_path) -> int:
 def _cmd_rollback(args, config, host, hub_path) -> int:
     backup_root = Path(config.backup.path).expanduser()
     if args.backup_dir:
-        backup_dir = Path(args.backup_dir)
+        backup_dir: Optional[Path] = Path(args.backup_dir)
     else:
         backup_dir = backup.find_latest_backup(backup_root)
         if backup_dir is None:
             print("no backup found", file=sys.stderr)
             return 1
 
+    assert backup_dir is not None
     print(f"restoring from: {backup_dir}")
     backup.rollback(backup_dir, hub_path)
 
@@ -575,9 +619,26 @@ def _cmd_uninstall_daemon(args) -> int:
     return 0
 
 
+def _cmd_daemon_run(args, config, host, hub_path) -> int:
+    """Run one locked scan and append output to platform-specific logs."""
+    log_dir = platform_daemon.logs_dir()
+    log_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        with platform_daemon.acquire_lock():
+            with (log_dir / "daemon.log").open("a", encoding="utf-8") as out:
+                with (log_dir / "daemon.err").open("a", encoding="utf-8") as err:
+                    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                        args.dry_run = False
+                        return _cmd_scan(args, config, host, hub_path)
+    except platform_support.LockBusy:
+        return 0
+
+
 # ============================ helpers ============================
 
-def _load_or_init_snapshot(snapshot_path: Path, host) -> dict:
+def _load_or_init_snapshot(
+    snapshot_path: Path, host, persist: bool = True
+) -> dict:
     """Load snapshot, or create genesis snapshot if not exists."""
     if snapshot_path.exists():
         try:
@@ -618,10 +679,11 @@ def _load_or_init_snapshot(snapshot_path: Path, host) -> dict:
     )
     snapshot["content_hash"] = f"sha256:{hashlib.sha256(content.encode()).hexdigest()}"
 
-    snapshot_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = snapshot_path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(snapshot, sort_keys=True, ensure_ascii=False))
-    os.rename(tmp, snapshot_path)
+    if persist:
+        snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = snapshot_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(snapshot, sort_keys=True, ensure_ascii=False))
+        platform_support.atomic_replace(tmp, snapshot_path)
     return snapshot
 
 

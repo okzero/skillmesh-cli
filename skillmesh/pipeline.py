@@ -8,7 +8,7 @@ from enum import Enum
 from pathlib import Path
 from typing import List, Optional
 
-from . import cas, discover, events
+from . import cas, discover, distribution, events
 from .config import Agent, Config
 from .discover import DiscoverResult, SkillCandidate
 from .events import EventLog, SkillEntry
@@ -99,7 +99,7 @@ def plan(discover_result: DiscoverResult, manifest: Manifest,
         if {a.name for a in targets} != {a.name for a in current}:
             result.ops.append(Op(
                 type=OpType.RELINK, name=name,
-                targets=targets, current_links=current,
+                existing=entry, targets=targets, current_links=current,
             ))
 
     return result
@@ -110,9 +110,12 @@ def validate(plan_result: PlanResult, config: Config,
     """Validate plan: check source exists, target writable, etc."""
     for op in plan_result.ops:
         if op.type in (OpType.ADD, OpType.UPDATE):
-            if not op.candidate.path.exists():
+            candidate = op.candidate
+            if candidate is None:
+                op.block("missing candidate")
+            elif not candidate.path.exists():
                 op.block("source missing")
-            elif op.candidate.status == "sync-pending":
+            elif candidate.status == "sync-pending":
                 op.block("sync-pending (placeholder file detected)")
         elif op.type == OpType.RELINK:
             if op.targets:
@@ -122,7 +125,9 @@ def validate(plan_result: PlanResult, config: Config,
                         op.block(f"agent parent dir missing: {agent_dir.parent}")
                     # M2: detect user content at target path - refuse to overwrite
                     link_path = _agent_link_path(op.name, agent, config)
-                    if link_path.exists() and not link_path.is_symlink():
+                    source = hub_path / "skills" / op.name
+                    state = distribution.inspect(link_path, source)
+                    if state.exists and state.mode == "unmanaged":
                         op.block(
                             f"refusing to overwrite non-symlink at "
                             f"{link_path} (user content may be present). "
@@ -142,6 +147,8 @@ def _agent_link_path(name: str, agent: Agent, config: Config) -> Path:
     if agent.layout == "directory":
         return agent_dir / name
     elif agent.layout == "file":
+        if agent.target_filename is None:
+            raise ValueError(f"file-layout agent {agent.name} has no target filename")
         target_filename = agent.target_filename.replace("{skill}", name)
         return agent_dir / target_filename
     return agent_dir / name  # fallback
@@ -351,6 +358,8 @@ def _execute_add(op: Op, config: Config, host: Host, blobs_dir: Path,
     it up as an orphan. Self-healing.
     """
     c = op.candidate
+    if c is None:
+        raise ValueError(f"ADD operation {op.name} has no candidate")
     content_hash = cas.write_blob(
         skill_dir=c.path,
         skill_name=c.name,
@@ -359,7 +368,10 @@ def _execute_add(op: Op, config: Config, host: Host, blobs_dir: Path,
         blobs_dir=blobs_dir,
         host_id=host.host_id,
     )
-    blob_hash = cas.read_meta(content_hash, blobs_dir).blob_hash
+    meta = cas.read_meta(content_hash, blobs_dir)
+    if meta is None:
+        raise RuntimeError(f"blob metadata missing after write: {content_hash}")
+    blob_hash = meta.blob_hash
 
     entry = SkillEntry(
         name=c.name, source=c.source, in_hub=True,
@@ -381,12 +393,17 @@ def _execute_update(op: Op, config: Config, host: Host, blobs_dir: Path,
     consistent with manifest.
     """
     c = op.candidate
+    if c is None:
+        raise ValueError(f"UPDATE operation {op.name} has no candidate")
     content_hash = cas.write_blob(
         skill_dir=c.path, skill_name=c.name,
         format_name=c.format, version=c.version,
         blobs_dir=blobs_dir, host_id=host.host_id,
     )
-    blob_hash = cas.read_meta(content_hash, blobs_dir).blob_hash
+    meta = cas.read_meta(content_hash, blobs_dir)
+    if meta is None:
+        raise RuntimeError(f"blob metadata missing after write: {content_hash}")
+    blob_hash = meta.blob_hash
 
     entry = SkillEntry(
         name=c.name, source=c.source, in_hub=True,
@@ -407,7 +424,8 @@ def _execute_relink(op: Op, config: Config, skills_dir: Path) -> None:
     # Add new links
     if op.targets:
         for agent in op.targets:
-            _link_skill(op.name, agent, config, skills_dir)
+            content_hash = op.existing.content_hash if op.existing else ""
+            _link_skill(op.name, agent, config, skills_dir, content_hash)
 
 
 def _apply_links(name: str, entry: SkillEntry, config: Config,
@@ -417,11 +435,12 @@ def _apply_links(name: str, entry: SkillEntry, config: Config,
         return  # detached
     targets = _compute_targets(entry, config.agents)
     for agent in targets:
-        _link_skill(name, agent, config, skills_dir)
+        _link_skill(name, agent, config, skills_dir, entry.content_hash)
 
 
-def _link_skill(name: str, agent: Agent, config: Config, skills_dir: Path) -> None:
-    """Create symlink from agent dir to hub/skills/<name>."""
+def _link_skill(name: str, agent: Agent, config: Config, skills_dir: Path,
+                content_hash: str = "") -> None:
+    """Distribute a skill using the configured platform strategy."""
     agent_dir = config.resolve_agent_dir(agent)
     agent_dir.mkdir(parents=True, exist_ok=True)
 
@@ -436,17 +455,15 @@ def _link_skill(name: str, agent: Agent, config: Config, skills_dir: Path) -> No
         entry_file = _find_entry_file(source, config.formats)
         if entry_file is None:
             return
+        if agent.target_filename is None:
+            return
         target_filename = agent.target_filename.replace("{skill}", name)
         link_path = agent_dir / target_filename
         source = entry_file
     else:
         return  # v1 only supports directory/file
 
-    # Remove existing symlink (or wrong target)
-    if link_path.is_symlink() or link_path.exists():
-        _safe_remove_link(link_path)
-
-    os.symlink(source, link_path)
+    distribution.create(source, link_path, agent.link_mode)
 
 
 def _unlink_skill(name: str, agent: Agent, config: Config) -> None:
@@ -454,13 +471,15 @@ def _unlink_skill(name: str, agent: Agent, config: Config) -> None:
     if agent.layout == "directory":
         link_path = agent_dir / name
     elif agent.layout == "file":
+        if agent.target_filename is None:
+            return
         target_filename = agent.target_filename.replace("{skill}", name)
         link_path = agent_dir / target_filename
     else:
         return
 
-    if link_path.is_symlink():
-        link_path.unlink()
+    if distribution.inspect(link_path).exists:
+        distribution.remove(link_path)
 
 
 def _find_entry_file(skill_dir: Path, formats) -> Optional[Path]:
@@ -486,11 +505,14 @@ def _read_current_links(name: str, agents: List[Agent], config: Config) -> List[
         if agent.layout == "directory":
             link_path = agent_dir / name
         elif agent.layout == "file":
+            if agent.target_filename is None:
+                continue
             target_filename = agent.target_filename.replace("{skill}", name)
             link_path = agent_dir / target_filename
         else:
             continue
-        if link_path.is_symlink():
+        source = config.resolve_hub_path() / "skills" / name
+        if distribution.inspect(link_path, source).correct:
             result.append(agent)
     return result
 
@@ -522,12 +544,7 @@ def _safe_remove_link(path: Path) -> None:
 
     See review B5.
     """
-    if path.is_symlink():
-        path.unlink()
-    elif path.exists():
-        # Real file or dir exists at target path - refuse to delete.
-        # Caller should block the operation and prompt user to resolve manually.
-        raise RuntimeError(
-            f"refusing to delete existing non-symlink at {path} "
-            f"(user content may be present). Remove it manually first."
-        )
+    try:
+        distribution.remove(path)
+    except distribution.DistributionError as exc:
+        raise RuntimeError(f"refusing to delete target: {exc}") from exc

@@ -6,8 +6,9 @@ import json
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List
+from typing import Dict, List, Tuple
 
+from . import distribution
 from .config import Config
 from .manifest import Manifest
 
@@ -26,6 +27,8 @@ class SkillStatus:
     wrong_target: bool = False
     sync_pending: bool = False
     conflict: str = ""  # "MIXED-VERSION-CONFLICT" or "VERSIONLESS-CONFLICT"
+    distribution_modes: Dict[str, str] = field(default_factory=dict)
+    local_modified: bool = False
 
 
 @dataclass
@@ -55,7 +58,9 @@ def status(manifest: Manifest, config: Config, hub_path: Path) -> StatusResult:
             state = "active" if entry.in_hub else "isolated"
 
         targets = _compute_target_names(entry, config.agents)
-        current = _read_current_link_names(name, config)
+        current, modes, local_modified = _read_current_link_names(
+            name, config, skills_dir / name
+        )
 
         skill_status = SkillStatus(
             name=name,
@@ -66,6 +71,8 @@ def status(manifest: Manifest, config: Config, hub_path: Path) -> StatusResult:
             state=state,
             targets=targets,
             current_links=current,
+            distribution_modes=modes,
+            local_modified=local_modified,
         )
 
         # Detect issues
@@ -107,15 +114,22 @@ def invariants(manifest: Manifest, config: Config, hub_path: Path) -> List[str]:
     # 3. No path escapes in .uninstalled/
     import re
     name_re = re.compile(r"^[a-zA-Z0-9._-]+$")
-    if uninstalled_dir.exists():
-        for entry in uninstalled_dir.iterdir():
-            if entry.is_symlink():
+    if (uninstalled_dir.is_symlink()
+            or distribution.is_junction(uninstalled_dir)):
+        violations.append(
+            ".uninstalled root is a symlink/junction (path escape risk)"
+        )
+    elif uninstalled_dir.exists():
+        for uninstalled_entry in uninstalled_dir.iterdir():
+            if (uninstalled_entry.is_symlink()
+                    or distribution.is_junction(uninstalled_entry)):
                 violations.append(
-                    f".uninstalled/{entry.name} is a symlink (path escape risk)"
+                    f".uninstalled/{uninstalled_entry.name} is a symlink "
+                    f"(path escape risk)"
                 )
-            if not name_re.match(entry.name):
+            if not name_re.match(uninstalled_entry.name):
                 violations.append(
-                    f".uninstalled/{entry.name} has invalid name"
+                    f".uninstalled/{uninstalled_entry.name} has invalid name"
                 )
 
     # 4. No broken symlinks in agent dirs
@@ -134,7 +148,11 @@ def invariants(manifest: Manifest, config: Config, hub_path: Path) -> List[str]:
         if not entry.in_hub:
             continue
         targets = _compute_target_names(entry, config.agents)
-        current = _read_current_link_names(name, config)
+        current, _, local_modified = _read_current_link_names(
+            name, config, skills_dir / name
+        )
+        if local_modified:
+            violations.append(f"skill {name!r}: managed copy was locally modified")
         if set(targets) != set(current):
             violations.append(
                 f"skill {name!r}: targets={targets} but links={current}"
@@ -163,6 +181,8 @@ def print_status(result: StatusResult, json_output: bool = False) -> None:
             issues.append("ORPHAN")
         if s.wrong_target:
             issues.append("WRONG-TARGET")
+        if s.local_modified:
+            issues.append("LOCAL-MODIFIED")
         if s.sync_pending:
             issues.append("SYNC-PENDING")
         if s.conflict:
@@ -188,18 +208,29 @@ def _compute_target_names(entry, agents) -> List[str]:
     return [a.name for a in agents if entry.source in a.accept_sources]
 
 
-def _read_current_link_names(name: str, config: Config) -> List[str]:
-    """Find which agents currently have a symlink for this skill."""
-    result = []
+def _read_current_link_names(
+    name: str, config: Config, source: Path
+) -> Tuple[List[str], Dict[str, str], bool]:
+    """Find correct managed distributions and their modes."""
+    result: List[str] = []
+    modes: Dict[str, str] = {}
+    local_modified = False
     for agent in config.agents:
         agent_dir = config.resolve_agent_dir(agent)
         if agent.layout == "directory":
             link_path = agent_dir / name
         elif agent.layout == "file":
+            if agent.target_filename is None:
+                continue
             target_filename = agent.target_filename.replace("{skill}", name)
             link_path = agent_dir / target_filename
         else:
             continue
-        if link_path.is_symlink():
+        state = distribution.inspect(link_path, source)
+        if state.exists:
+            modes[agent.name] = state.mode
+        if state.local_modified:
+            local_modified = True
+        if state.correct:
             result.append(agent.name)
-    return result
+    return result, modes, local_modified

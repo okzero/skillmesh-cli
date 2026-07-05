@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from skillmesh import cas
+from conftest import symlink_or_skip
 
 
 def _make_skill(tmp_path, name="test-skill", content="# hello", fmt="SKILL.md"):
@@ -75,6 +76,37 @@ def test_write_blob_idempotent(tmp_path):
     assert len(blob_dirs) == 1
 
 
+def test_write_blob_concurrent_same_hash_is_idempotent(tmp_path, monkeypatch):
+    skill = _make_skill(tmp_path, "my-skill", "# content")
+    blobs_dir = tmp_path / "blobs"
+    blobs_dir.mkdir()
+    real_replace = cas.atomic_replace
+    raced = False
+
+    def concurrent_replace(source, target, retries=5):
+        nonlocal raced
+        if not raced and source.name.startswith(".tmp."):
+            raced = True
+            shutil.copytree(source, target)
+            raise FileExistsError("simulated concurrent CAS writer")
+        return real_replace(source, target, retries)
+
+    monkeypatch.setattr(cas, "atomic_replace", concurrent_replace)
+    content_hash = cas.write_blob(
+        skill, "my-skill", "skill-md", "1.0.0", blobs_dir, "host-1"
+    )
+    assert cas.read_meta(content_hash, blobs_dir) is not None
+    assert not list(blobs_dir.glob(".tmp.*"))
+
+
+@pytest.mark.skipif(os.name == "nt", reason="invalid names cannot be created")
+def test_content_hash_rejects_windows_incompatible_member(tmp_path):
+    skill = _make_skill(tmp_path, "my-skill", "# content")
+    (skill / "file:stream").write_text("not portable")
+    with pytest.raises(ValueError, match="non-portable skill path"):
+        cas.compute_content_hash(skill, "my-skill", "skill-md", "")
+
+
 def test_write_blob_creates_meta(tmp_path):
     skill = _make_skill(tmp_path, "my-skill", "# content")
     blobs_dir = tmp_path / "blobs"
@@ -119,7 +151,7 @@ def test_materialize_overwrites_existing_symlink(tmp_path):
     content_hash = cas.write_blob(skill, "my-skill", "skill-md", "1.0.0", blobs_dir, "host-1")
     target = skills_dir / "my-skill"
     # Pre-existing symlink (skillmesh-owned, safe to replace)
-    os.symlink(tmp_path / "old-target", target)
+    symlink_or_skip(tmp_path / "old-target", target, target_is_directory=True)
     (tmp_path / "old-target").mkdir()
 
     cas.materialize(content_hash, "my-skill", skills_dir, blobs_dir)

@@ -17,13 +17,20 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
 
+from .distribution import LINK_MODES
+from .platform_support import (
+    config_dir,
+    default_backup_dir,
+    is_safe_portable_name,
+)
+
 
 CONFIG_ENV = "SKILLMESH_CONFIG"
 
 
 def _default_config_dir() -> Path:
     """Compute default config dir based on current HOME (test-friendly)."""
-    return Path(os.path.expanduser("~/.config/skillmesh"))
+    return config_dir()
 
 SKILL_NAME_RE = re.compile(r"^[a-zA-Z0-9._-]+$")
 LAYOUTS_V1 = {"directory", "file"}
@@ -47,8 +54,17 @@ class Agent:
     accept_sources: List[str]
     layout: str = "directory"
     target_filename: Optional[str] = None
+    link_mode: str = "auto"
 
     def validate(self) -> None:
+        if self.link_mode not in LINK_MODES:
+            raise ConfigError(
+                f"agent {self.name}: link_mode must be one of {LINK_MODES}"
+            )
+        if self.link_mode == "junction" and self.layout != "directory":
+            raise ConfigError(
+                f"agent {self.name}: junction link_mode requires directory layout"
+            )
         if self.layout not in LAYOUTS_V1:
             raise ConfigError(
                 f"agent {self.name}: layout must be one of {LAYOUTS_V1} in v1 "
@@ -63,6 +79,12 @@ class Agent:
                 raise ConfigError(
                     f"agent {self.name}: target_filename must contain "
                     f"'{{skill}}' placeholder (got {self.target_filename!r})"
+                )
+            rendered = self.target_filename.replace("{skill}", "skill")
+            if not is_safe_portable_name(rendered):
+                raise ConfigError(
+                    f"agent {self.name}: target_filename is not portable "
+                    f"across Windows/macOS/Linux: {self.target_filename!r}"
                 )
 
 
@@ -95,7 +117,7 @@ class Placeholders:
 
 @dataclass
 class Backup:
-    path: str = "~/.local/state/skillmesh/backups"
+    path: str = field(default_factory=lambda: str(default_backup_dir()))
 
 
 @dataclass
@@ -123,6 +145,12 @@ class Config:
             raise ConfigError("at least one agent is required")
         for agent in self.agents:
             agent.validate()
+        for skill_format in self.formats:
+            if not is_safe_portable_name(skill_format.filename):
+                raise ConfigError(
+                    f"format {skill_format.name}: filename is not portable "
+                    f"across Windows/macOS/Linux: {skill_format.filename!r}"
+                )
         if not self.watch.dirs:
             raise ConfigError("watch.dirs is required")
         # Check duplicate agent names
@@ -222,6 +250,7 @@ def _normalize(raw: dict) -> Config:
             accept_sources=list(a["accept_sources"]),
             layout=a.get("layout", "directory"),
             target_filename=a.get("target_filename"),
+            link_mode=a.get("link_mode", "auto"),
         )
         for a in raw.get("agents", [])
     ]
@@ -256,7 +285,7 @@ def _normalize(raw: dict) -> Config:
         placeholders = Placeholders()
 
     backup_raw = raw.get("backup", {})
-    backup = Backup(path=backup_raw.get("path", "~/.local/state/skillmesh/backups"))
+    backup = Backup(path=backup_raw.get("path", str(default_backup_dir())))
 
     return Config(
         hub=hub,

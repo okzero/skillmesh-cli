@@ -9,10 +9,11 @@ from pathlib import Path
 
 import pytest
 
-from skillmesh import events, lifecycle, manifest as manifest_mod
+from skillmesh import distribution, events, lifecycle, manifest as manifest_mod
 from skillmesh.events import EventLog, SkillEntry
 from skillmesh.host import Host
 from skillmesh.config import Config, Hub, Agent, Watch
+from conftest import symlink_or_skip
 
 
 def _setup_env(tmp_path):
@@ -64,7 +65,7 @@ def test_detach_removes_links_keeps_entry(tmp_path):
     link = agent_dir / "my-skill"
     if link.exists() or link.is_symlink():
         link.unlink()
-    os.symlink(skills_dir / "my-skill", link)
+    symlink_or_skip(skills_dir / "my-skill", link, target_is_directory=True)
 
     lifecycle.detach("my-skill", manifest, event_log, config, skills_dir)
 
@@ -86,7 +87,7 @@ def test_attach_restores_links(tmp_path):
     assert entry.target_override is None
     # Link recreated
     link = Path("~/.codex/skills/my-skill").expanduser()
-    assert link.is_symlink()
+    assert distribution.inspect(link, skills_dir / "my-skill").correct
 
 
 def test_uninstall_moves_to_uninstalled_dir(tmp_path):
@@ -175,7 +176,7 @@ def test_uninstall_rejects_symlink_in_target(tmp_path):
     link = hub / ".uninstalled" / "my-skill"
     if link.exists() or link.is_symlink():
         link.unlink()
-    os.symlink(evil_target, link)
+    symlink_or_skip(evil_target, link, target_is_directory=True)
 
     # Try to uninstall - should refuse (symlink in .uninstalled/)
     # Note: uninstall would rename source to target. Since target is symlink,
@@ -196,6 +197,18 @@ def test_dry_run_does_nothing(tmp_path):
     # Skill still in skills/, no new events
     assert (skills_dir / "my-skill").exists()
     assert len(event_log.read_all()) == initial_events
+
+
+def test_uninstall_rejects_linked_quarantine_root(tmp_path):
+    """A replaced .uninstalled root must never redirect lifecycle moves."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    quarantine = tmp_path / "hub" / ".uninstalled"
+    quarantine.parent.mkdir()
+    symlink_or_skip(outside, quarantine, target_is_directory=True)
+
+    with pytest.raises(lifecycle.PathEscape, match="root is a link/junction"):
+        lifecycle._safe_uninstall_path("my-skill", quarantine)
 
 
 def test_purge_nonexistent_skill_errors(tmp_path):
@@ -253,7 +266,7 @@ def test_gc_keeps_uninstalled_skill_blob(tmp_path):
     removed = lifecycle.gc(manifest, event_log, hub, blobs_dir, dry_run=False)
     assert removed == 0  # nothing removed
     # Blob still exists
-    assert (blobs_dir / content_hash).exists()
+    assert cas.blob_path(blobs_dir, content_hash).exists()
 
 
 def test_gc_deletes_purged_blob_only_when_all_hosts_confirmed(tmp_path):
@@ -281,7 +294,7 @@ def test_gc_deletes_purged_blob_only_when_all_hosts_confirmed(tmp_path):
     removed = lifecycle.gc(manifest, event_log, hub, blobs_dir, dry_run=False)
     # Single host, all confirmed - blob should be deleted
     assert removed >= 1
-    assert not (blobs_dir / content_hash).exists()
+    assert not cas.blob_path(blobs_dir, content_hash).exists()
 
 
 def test_gc_does_not_delete_when_other_host_missing_purge(tmp_path):
@@ -319,7 +332,8 @@ def test_gc_does_not_delete_when_other_host_missing_purge(tmp_path):
         "prev_lamport": 0,
         "schema_version": 1,
     }
-    (other_host_dir / "1-1-deadbeefdeadbeef.json").write_text(
+    parsed_other_event = events.Event.from_dict(other_event)
+    (other_host_dir / parsed_other_event.filename).write_text(
         json.dumps(other_event, sort_keys=True)
     )
 
@@ -329,4 +343,4 @@ def test_gc_does_not_delete_when_other_host_missing_purge(tmp_path):
     # gc - other host hasn't written purge, should refuse to delete blob
     removed = lifecycle.gc(manifest, event_log, hub, blobs_dir, dry_run=False)
     # Blob preserved (other host hasn't confirmed purge)
-    assert (blobs_dir / content_hash).exists()
+    assert cas.blob_path(blobs_dir, content_hash).exists()

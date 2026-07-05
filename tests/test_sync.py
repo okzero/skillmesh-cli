@@ -8,10 +8,13 @@ from pathlib import Path
 
 import pytest
 
-from skillmesh import cas, events, manifest as manifest_mod, pipeline, discover
+from skillmesh import (
+    cas, discover, distribution, events, manifest as manifest_mod, pipeline,
+)
 from skillmesh.config import Agent, Config, Format, Hub, Source, Watch
 from skillmesh.events import EventLog, SkillEntry
 from skillmesh.host import Host
+from conftest import set_test_home
 
 
 HOST_A_ID = "aaaaaaaa-0000-0000-0000-000000000000"
@@ -90,7 +93,7 @@ def test_dual_machine_convergence(tmp_path, monkeypatch):
     home_b, hub_b, host_b, src_b = _make_machine(tmp_path / "b", HOST_B_ID)
 
     # A creates a skill and scans
-    monkeypatch.setenv("HOME", str(home_a))
+    set_test_home(monkeypatch, home_a)
     config_a = _make_config(hub_a)
     skill_dir = src_a / "my-skill"
     skill_dir.mkdir()
@@ -108,7 +111,7 @@ def test_dual_machine_convergence(tmp_path, monkeypatch):
     shutil.copytree(hub_a, hub_b)
 
     # B scans (should pick up the skill via event replay)
-    monkeypatch.setenv("HOME", str(home_b))
+    set_test_home(monkeypatch, home_b)
     config_b = _make_config(hub_b)
     _scan(home_b, hub_b, host_b, config_b)
 
@@ -118,7 +121,7 @@ def test_dual_machine_convergence(tmp_path, monkeypatch):
 
     # B's agent dir should have the symlink
     link = home_b / ".codex" / "skills" / "my-skill"
-    assert link.is_symlink()
+    assert distribution.inspect(link, hub_b / "skills" / "my-skill").correct
 
 
 def test_dual_machine_simultaneous_add_different_skills(tmp_path, monkeypatch):
@@ -127,14 +130,14 @@ def test_dual_machine_simultaneous_add_different_skills(tmp_path, monkeypatch):
     home_b, hub_b, host_b, src_b = _make_machine(tmp_path / "b", HOST_B_ID)
 
     # A adds skill-a
-    monkeypatch.setenv("HOME", str(home_a))
+    set_test_home(monkeypatch, home_a)
     config_a = _make_config(hub_a)
     (src_a / "skill-a").mkdir()
     (src_a / "skill-a" / "SKILL.md").write_text("# A")
     _scan(home_a, hub_a, host_a, config_a)
 
     # B adds skill-b (independently, before sync)
-    monkeypatch.setenv("HOME", str(home_b))
+    set_test_home(monkeypatch, home_b)
     config_b = _make_config(hub_b)
     (src_b / "skill-b").mkdir()
     (src_b / "skill-b" / "SKILL.md").write_text("# B")
@@ -167,9 +170,9 @@ def test_dual_machine_simultaneous_add_different_skills(tmp_path, monkeypatch):
             shutil.copytree(blob, target)
 
     # Both machines scan again
-    monkeypatch.setenv("HOME", str(home_a))
+    set_test_home(monkeypatch, home_a)
     _scan(home_a, hub_a, host_a, config_a)
-    monkeypatch.setenv("HOME", str(home_b))
+    set_test_home(monkeypatch, home_b)
     _scan(home_b, hub_b, host_b, config_b)
 
     # Both should have both skills
@@ -179,11 +182,11 @@ def test_dual_machine_simultaneous_add_different_skills(tmp_path, monkeypatch):
     assert (hub_b / "skills" / "skill-b").exists()
 
 
-def test_corrupt_event_skipped_not_crash(tmp_path, monkeypatch):
-    """T14: corrupt event file is skipped, not crash."""
+def test_corrupt_event_aborts_sync_without_mutation(tmp_path, monkeypatch):
+    """T14: corrupt synced truth source aborts replay and remains intact."""
     home_a, hub_a, host_a, src_a = _make_machine(tmp_path / "a", HOST_A_ID)
 
-    monkeypatch.setenv("HOME", str(home_a))
+    set_test_home(monkeypatch, home_a)
     config_a = _make_config(hub_a)
 
     # Write a valid event first
@@ -196,16 +199,9 @@ def test_corrupt_event_skipped_not_crash(tmp_path, monkeypatch):
     corrupt = host_subdir / "999-999-deadbeefdeadbeef.json"
     corrupt.write_text("{ invalid json")
 
-    # Re-scan should not crash
-    _scan(home_a, hub_a, host_a, config_a)
-
-    # Good skill still in manifest
-    event_log = EventLog(hub_a / "events", host_a)
-    snapshot = json.loads((hub_a / "snapshot.json").read_text())
-    manifest = manifest_mod.load_or_rebuild(
-        hub_a / "manifest.json", snapshot, event_log, config_a, host_a.host_id
-    )
-    assert "good" in manifest.skills
+    with pytest.raises(events.EventCorruptError, match="Replay aborted"):
+        _scan(home_a, hub_a, host_a, config_a)
+    assert corrupt.exists()
 
 
 def test_manifest_converges_after_sync(tmp_path, monkeypatch):
@@ -214,7 +210,7 @@ def test_manifest_converges_after_sync(tmp_path, monkeypatch):
     home_b, hub_b, host_b, src_b = _make_machine(tmp_path / "b", HOST_B_ID)
 
     # A adds skill
-    monkeypatch.setenv("HOME", str(home_a))
+    set_test_home(monkeypatch, home_a)
     config_a = _make_config(hub_a)
     (src_a / "shared").mkdir()
     (src_a / "shared" / "SKILL.md").write_text("# shared")
@@ -225,7 +221,7 @@ def test_manifest_converges_after_sync(tmp_path, monkeypatch):
     shutil.copytree(hub_a, hub_b)
 
     # B scans
-    monkeypatch.setenv("HOME", str(home_b))
+    set_test_home(monkeypatch, home_b)
     config_b = _make_config(hub_b)
     _scan(home_b, hub_b, host_b, config_b)
 

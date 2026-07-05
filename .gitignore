@@ -44,3 +44,6 @@ htmlcov/
 
 # Internal design doc - do not publish
 docs/PRD.md
+
+# Private L4 execution evidence (PR receives sanitized summary only)
+.ai/

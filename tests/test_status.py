@@ -13,6 +13,7 @@ from skillmesh.config import Agent, Config, Hub, Watch
 from skillmesh.events import SkillEntry
 from skillmesh.host import Host
 from skillmesh.manifest import Manifest, Tombstone
+from conftest import set_test_home, symlink_or_skip
 
 
 def _make_config(hub_path):
@@ -35,7 +36,7 @@ def test_status_lists_skills(tmp_path, monkeypatch):
     """F9.1: status lists skills with state."""
     fake_home = tmp_path / "home"
     fake_home.mkdir()
-    monkeypatch.setenv("HOME", str(fake_home))
+    set_test_home(monkeypatch, fake_home)
 
     hub = tmp_path / "hub"
     (hub / "skills").mkdir(parents=True)
@@ -60,7 +61,7 @@ def test_status_shows_detached(tmp_path, monkeypatch):
     """F9.1: detached skill shows 'detached' state."""
     fake_home = tmp_path / "home"
     fake_home.mkdir()
-    monkeypatch.setenv("HOME", str(fake_home))
+    set_test_home(monkeypatch, fake_home)
 
     hub = tmp_path / "hub"
     (hub / "skills").mkdir(parents=True)
@@ -80,7 +81,7 @@ def test_status_shows_uninstalled(tmp_path, monkeypatch):
     """F9.1: uninstalled skill shows 'uninstalled' state."""
     fake_home = tmp_path / "home"
     fake_home.mkdir()
-    monkeypatch.setenv("HOME", str(fake_home))
+    set_test_home(monkeypatch, fake_home)
 
     hub = tmp_path / "hub"
     hub.mkdir()
@@ -100,7 +101,7 @@ def test_status_json_output(tmp_path, monkeypatch, capsys):
     """F9.2: --json produces structured output."""
     fake_home = tmp_path / "home"
     fake_home.mkdir()
-    monkeypatch.setenv("HOME", str(fake_home))
+    set_test_home(monkeypatch, fake_home)
 
     hub = tmp_path / "hub"
     hub.mkdir()
@@ -122,7 +123,7 @@ def test_invariants_no_violations(tmp_path, monkeypatch):
     """invariants returns empty list when everything is OK."""
     fake_home = tmp_path / "home"
     fake_home.mkdir()
-    monkeypatch.setenv("HOME", str(fake_home))
+    set_test_home(monkeypatch, fake_home)
 
     hub = tmp_path / "hub"
     (hub / "skills").mkdir(parents=True)
@@ -136,7 +137,9 @@ def test_invariants_no_violations(tmp_path, monkeypatch):
     # Create the symlink so invariant passes
     agent_dir = fake_home / ".codex" / "skills"
     agent_dir.mkdir(parents=True)
-    os.symlink(hub / "skills" / "x", agent_dir / "x")
+    symlink_or_skip(
+        hub / "skills" / "x", agent_dir / "x", target_is_directory=True
+    )
 
     violations = status_mod.invariants(manifest, config, hub)
     assert violations == []
@@ -146,7 +149,7 @@ def test_invariants_detects_broken_symlink(tmp_path, monkeypatch):
     """invariants detects broken symlinks in agent dirs."""
     fake_home = tmp_path / "home"
     fake_home.mkdir()
-    monkeypatch.setenv("HOME", str(fake_home))
+    set_test_home(monkeypatch, fake_home)
 
     hub = tmp_path / "hub"
     hub.mkdir()
@@ -157,7 +160,7 @@ def test_invariants_detects_broken_symlink(tmp_path, monkeypatch):
     # Create a broken symlink
     agent_dir = fake_home / ".codex" / "skills"
     agent_dir.mkdir(parents=True)
-    os.symlink("/nonexistent/target", agent_dir / "broken")
+    symlink_or_skip("/nonexistent/target", agent_dir / "broken")
 
     violations = status_mod.invariants(manifest, config, hub)
     assert any("broken" in v.lower() for v in violations)
@@ -167,7 +170,7 @@ def test_invariants_detects_unfinished_lifecycle(tmp_path, monkeypatch):
     """invariants detects skills in pending/restoring state."""
     fake_home = tmp_path / "home"
     fake_home.mkdir()
-    monkeypatch.setenv("HOME", str(fake_home))
+    set_test_home(monkeypatch, fake_home)
 
     hub = tmp_path / "hub"
     hub.mkdir()
@@ -186,7 +189,7 @@ def test_invariants_detects_symlink_in_uninstalled(tmp_path, monkeypatch):
     """T15: invariants detects symlinks in .uninstalled/ (path escape risk)."""
     fake_home = tmp_path / "home"
     fake_home.mkdir()
-    monkeypatch.setenv("HOME", str(fake_home))
+    set_test_home(monkeypatch, fake_home)
 
     hub = tmp_path / "hub"
     (hub / ".uninstalled").mkdir(parents=True)
@@ -194,10 +197,27 @@ def test_invariants_detects_symlink_in_uninstalled(tmp_path, monkeypatch):
     # Create a symlink in .uninstalled/
     evil_target = tmp_path / "evil"
     evil_target.mkdir()
-    os.symlink(evil_target, hub / ".uninstalled" / "evil-link")
+    symlink_or_skip(
+        evil_target, hub / ".uninstalled" / "evil-link", target_is_directory=True
+    )
 
     config = _make_config(hub)
     manifest = Manifest(skills={})
 
     violations = status_mod.invariants(manifest, config, hub)
     assert any("symlink" in v.lower() and "uninstalled" in v.lower() for v in violations)
+
+
+def test_invariants_detects_linked_uninstalled_root(tmp_path, monkeypatch):
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    set_test_home(monkeypatch, fake_home)
+
+    hub = tmp_path / "hub"
+    hub.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    symlink_or_skip(outside, hub / ".uninstalled", target_is_directory=True)
+
+    violations = status_mod.invariants(Manifest(), _make_config(hub), hub)
+    assert any("uninstalled root" in item for item in violations)

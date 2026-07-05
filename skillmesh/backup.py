@@ -13,10 +13,14 @@ See docs/PRD.md §9.8, docs/ARCHITECTURE.md §11.4.
 import hashlib
 import json
 import os
+import tarfile
 import time
 import uuid
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import List, Optional
+
+from . import distribution
+from .platform_support import system_name
 
 
 BACKUP_TARGETS = [
@@ -78,18 +82,22 @@ def rollback(backup_dir: Path, hub_path: Path) -> None:
                 f"actual={actual.get('sha256')}"
             )
 
-    # Remove existing hub content (the targets we're about to restore)
-    import shutil
-    for name in BACKUP_TARGETS:
-        target = hub_path / name
-        if target.is_dir():
-            shutil.rmtree(target)
-        elif target.exists():
-            target.unlink()
-
-    # Extract tar (safe: prevent path traversal)
-    import tarfile
+    # Validate every archive member before touching the current hub.
     with tarfile.open(tar_path, "r:gz") as tf:
+        _validate_members(tf, hub_path)
+
+        import shutil
+        for name in BACKUP_TARGETS:
+            target = hub_path / name
+            if target.is_symlink():
+                target.unlink()
+            elif distribution.is_junction(target):
+                os.rmdir(target)
+            elif target.is_dir():
+                shutil.rmtree(target)
+            elif target.exists():
+                target.unlink()
+
         _safe_extract(tf, hub_path)
 
 
@@ -104,12 +112,35 @@ def _safe_extract(tar: "tarfile.TarFile", dest: Path) -> None:
 
     See security review B3.
     """
+    _validate_members(tar, dest)
+    try:
+        tar.extractall(dest, filter="data")
+    except TypeError:
+        tar.extractall(dest)
+
+
+def _validate_members(tar: "tarfile.TarFile", dest: Path) -> None:
+    """Validate all archive paths without changing the destination."""
     dest_resolved = dest.resolve()
     for member in tar.getmembers():
+        posix_name = PurePosixPath(member.name)
+        windows_name = PureWindowsPath(member.name)
+        if (posix_name.is_absolute() or windows_name.is_absolute()
+                or windows_name.drive or ".." in posix_name.parts
+                or ".." in windows_name.parts
+                or (system_name() == "Windows"
+                    and any(":" in part for part in windows_name.parts))):
+            raise BackupError(
+                f"cross-platform path traversal detected: {member.name}"
+            )
         # Reject symlinks/hardlinks (could escape dest)
         if member.issym() or member.islnk():
             raise BackupError(
                 f"refusing to extract symlink/hardlink member: {member.name}"
+            )
+        if not (member.isfile() or member.isdir()):
+            raise BackupError(
+                f"refusing to extract special archive member: {member.name}"
             )
         # Compute resolved target path
         member_path = (dest / member.name).resolve()
@@ -125,14 +156,6 @@ def _safe_extract(tar: "tarfile.TarFile", dest: Path) -> None:
             raise BackupError(
                 f"absolute path in tar, refusing to extract: {member.name}"
             )
-    # All members validated, extract (use 'data' filter for Python 3.12+
-    # to also reject things like device files, fifos, etc.)
-    try:
-        tar.extractall(dest, filter="data")
-    except TypeError:
-        # Python < 3.12 - filter argument not supported, fall back
-        # (we already validated members above)
-        tar.extractall(dest)
 
 
 def list_backups(backup_root: Path) -> List[dict]:
@@ -141,7 +164,7 @@ def list_backups(backup_root: Path) -> List[dict]:
     if not backup_root.exists():
         return []
 
-    backups = []
+    backups: List[dict] = []
     for d in backup_root.iterdir():
         if not d.is_dir():
             continue
@@ -155,7 +178,7 @@ def list_backups(backup_root: Path) -> List[dict]:
             "size": stat.st_size,
         })
 
-    backups.sort(key=lambda b: b["timestamp"], reverse=True)
+    backups.sort(key=lambda b: int(b["timestamp"]), reverse=True)
     return backups
 
 

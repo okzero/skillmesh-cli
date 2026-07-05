@@ -51,18 +51,22 @@ prefix = "~/Documents/personal"
 #       or "file" (entry file symlinked to <dir>/<target_filename>)
 # file layout requires target_filename with {skill} placeholder.
 # "single-file" (one file fanout to <dir>/CLAUDE.md) is v1.1+, not in v1.
+# link_mode: auto | symlink | junction | copy. On Windows auto uses junction
+# for directories and symlink with safe copy fallback for files.
 
 [[agents]]
 name = "codex"
 dir = "~/.codex/skills"
 accept_sources = ["work", "personal"]
 layout = "directory"
+link_mode = "auto"
 
 [[agents]]
 name = "claude-code"
 dir = "~/.claude/skills"
 accept_sources = ["work", "personal"]
 layout = "directory"
+link_mode = "auto"
 
 [[agents]]
 name = "cursor"
@@ -70,6 +74,7 @@ dir = "~/.cursor/rules"
 accept_sources = ["personal"]
 layout = "file"
 target_filename = "{skill}.mdc"
+link_mode = "auto"
 
 # Example: additional agent
 # [[agents]]

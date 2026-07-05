@@ -7,12 +7,13 @@ from pathlib import Path
 
 import pytest
 
-from skillmesh import cas, discover, pipeline
+from skillmesh import cas, discover, distribution, pipeline
 from skillmesh import manifest as manifest_mod
 from skillmesh.config import Agent, Config, Format, Hub, Source, Watch
 from skillmesh.events import EventLog, SkillEntry
 from skillmesh.host import Host
 from skillmesh.manifest import Manifest
+from conftest import set_test_home, symlink_or_skip
 
 
 def _make_config(hub_path, agents=None):
@@ -44,7 +45,7 @@ def test_discover_finds_skill(tmp_path, monkeypatch):
     """F2.1: discover finds skill in watch.dirs."""
     fake_home = tmp_path / "home"
     fake_home.mkdir()
-    monkeypatch.setenv("HOME", str(fake_home))
+    set_test_home(monkeypatch, fake_home)
     src_dir = fake_home / "skills-source"
     src_dir.mkdir()
     _make_skill(src_dir, "my-skill", "# hello")
@@ -62,7 +63,7 @@ def test_discover_skips_invalid_names(tmp_path, monkeypatch):
     """Invalid skill names (slash, space) skipped with warning."""
     fake_home = tmp_path / "home"
     fake_home.mkdir()
-    monkeypatch.setenv("HOME", str(fake_home))
+    set_test_home(monkeypatch, fake_home)
     src_dir = fake_home / "skills-source"
     src_dir.mkdir()
 
@@ -84,7 +85,7 @@ def test_discover_excludes_patterns(tmp_path, monkeypatch):
     """F2.4: exclude patterns applied."""
     fake_home = tmp_path / "home"
     fake_home.mkdir()
-    monkeypatch.setenv("HOME", str(fake_home))
+    set_test_home(monkeypatch, fake_home)
     src_dir = fake_home / "skills-source"
     src_dir.mkdir()
     _make_skill(src_dir, "keep")
@@ -103,7 +104,7 @@ def test_discover_dedup_by_name(tmp_path, monkeypatch):
     """Duplicate skill names skipped (keep first)."""
     fake_home = tmp_path / "home"
     fake_home.mkdir()
-    monkeypatch.setenv("HOME", str(fake_home))
+    set_test_home(monkeypatch, fake_home)
     src_dir = fake_home / "skills-source"
     src_dir.mkdir()
     other = fake_home / "other-source"
@@ -129,7 +130,7 @@ def test_directory_layout_creates_symlink(tmp_path, monkeypatch):
     """T29a: directory layout symlinks whole skill dir to <agent>/<skill>/."""
     fake_home = tmp_path / "home"
     fake_home.mkdir()
-    monkeypatch.setenv("HOME", str(fake_home))
+    set_test_home(monkeypatch, fake_home)
     src_dir = fake_home / "skills-source"
     src_dir.mkdir()
     _make_skill(src_dir, "my-skill", "# content")
@@ -157,7 +158,7 @@ def test_directory_layout_creates_symlink(tmp_path, monkeypatch):
 
     # Check symlink
     link = fake_home / ".codex" / "skills" / "my-skill"
-    assert link.is_symlink()
+    assert distribution.inspect(link, hub / "skills" / "my-skill").correct
     assert (link / "SKILL.md").exists()
 
 
@@ -165,7 +166,7 @@ def test_file_layout_creates_file_symlink(tmp_path, monkeypatch):
     """T29b: file layout symlinks entry file to <agent>/<target_filename>."""
     fake_home = tmp_path / "home"
     fake_home.mkdir()
-    monkeypatch.setenv("HOME", str(fake_home))
+    set_test_home(monkeypatch, fake_home)
     src_dir = fake_home / "skills-source"
     src_dir.mkdir()
     _make_skill(src_dir, "my-skill", "# content")
@@ -192,14 +193,16 @@ def test_file_layout_creates_file_symlink(tmp_path, monkeypatch):
 
     # Check cursor file symlink (target_filename = {skill}.mdc -> my-skill.mdc)
     link = fake_home / ".cursor" / "rules" / "my-skill.mdc"
-    assert link.is_symlink()
+    assert distribution.inspect(
+        link, hub / "skills" / "my-skill" / "SKILL.md"
+    ).correct
 
 
 def test_dry_run_makes_no_changes(tmp_path, monkeypatch):
     """T10/F5.8: --dry-run writes nothing."""
     fake_home = tmp_path / "home"
     fake_home.mkdir()
-    monkeypatch.setenv("HOME", str(fake_home))
+    set_test_home(monkeypatch, fake_home)
     src_dir = fake_home / "skills-source"
     src_dir.mkdir()
     _make_skill(src_dir, "my-skill")
@@ -260,7 +263,7 @@ def test_content_differs_recomputes_hash(tmp_path, monkeypatch):
     """
     fake_home = tmp_path / "home"
     fake_home.mkdir()
-    monkeypatch.setenv("HOME", str(fake_home))
+    set_test_home(monkeypatch, fake_home)
     src_dir = fake_home / "skills-source"
     src_dir.mkdir()
 
@@ -306,7 +309,7 @@ def test_update_writes_new_blob_when_content_changes(tmp_path, monkeypatch):
     """B1: scan with changed skill content writes update event + new blob."""
     fake_home = tmp_path / "home"
     fake_home.mkdir()
-    monkeypatch.setenv("HOME", str(fake_home))
+    set_test_home(monkeypatch, fake_home)
     src_dir = fake_home / "skills-source"
     src_dir.mkdir()
 
@@ -375,7 +378,7 @@ def test_link_refuses_to_delete_user_content(tmp_path, monkeypatch):
     """B5: _safe_remove_link refuses to delete non-symlink agent target (user content)."""
     fake_home = tmp_path / "home"
     fake_home.mkdir()
-    monkeypatch.setenv("HOME", str(fake_home))
+    set_test_home(monkeypatch, fake_home)
 
     # Pre-existing user file at agent target
     agent_dir = fake_home / ".codex" / "skills"
@@ -398,7 +401,7 @@ def test_link_removes_symlink_only(tmp_path):
     link = tmp_path / "link"
     target = tmp_path / "target"
     target.mkdir()
-    os.symlink(target, link)
+    symlink_or_skip(target, link, target_is_directory=True)
 
     pipeline._safe_remove_link(link)
     assert not link.exists()
@@ -411,7 +414,7 @@ def test_reconcile_keeps_old_on_mixed_conflict(tmp_path, monkeypatch):
     """
     fake_home = tmp_path / "home"
     fake_home.mkdir()
-    monkeypatch.setenv("HOME", str(fake_home))
+    set_test_home(monkeypatch, fake_home)
     src_dir = fake_home / "skills-source"
     src_dir.mkdir()
 

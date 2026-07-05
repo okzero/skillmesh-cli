@@ -17,20 +17,23 @@
       "name": "codex",
       "dir": "~/.codex/skills",
       "accept_sources": ["work", "personal"],
-      "layout": "directory"
+      "layout": "directory",
+      "link_mode": "auto"
     },
     {
       "name": "claude-code",
       "dir": "~/.claude/skills",
       "accept_sources": ["work", "personal"],
-      "layout": "directory"
+      "layout": "directory",
+      "link_mode": "auto"
     },
     {
       "name": "cursor",
       "dir": "~/.cursor/rules",
       "accept_sources": ["personal"],
       "layout": "file",
-      "target_filename": "{skill}.mdc"
+      "target_filename": "{skill}.mdc",
+      "link_mode": "auto"
     }
   ],
 

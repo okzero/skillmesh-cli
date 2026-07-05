@@ -35,6 +35,16 @@ def test_host_uuid8_for_event_dir(isolated_env):
     assert event_dir.endswith("-" + uuid8)
 
 
+def test_event_dir_sanitizes_nonportable_hostname():
+    host = host_mod.Host(
+        "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        ".CON:work/desk* ",
+    )
+    assert host.display_name == ".CON:work/desk* "
+    assert host.event_dir == "CON-work-desk-aaaaaaaa"
+    assert not any(char in host.event_dir for char in '<>:"/\\|?*')
+
+
 def test_hostname_change_keeps_uuid(isolated_env, monkeypatch):
     """T36: hostname can change but host_id stays stable."""
     host = host_mod.load_or_create_host()

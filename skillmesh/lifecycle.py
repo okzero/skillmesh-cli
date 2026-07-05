@@ -21,10 +21,12 @@ import re
 import shutil
 from pathlib import Path
 
+from . import distribution
 from .config import Config
 from .events import EventLog, SkillEntry
 from .host import Host
 from .manifest import Manifest
+from .platform_support import atomic_replace, is_safe_portable_name
 
 SKILL_NAME_RE = re.compile(r"^[a-zA-Z0-9._-]+$")
 
@@ -115,7 +117,7 @@ def uninstall(name: str, manifest: Manifest, event_log: EventLog,
     if source.exists():
         os.makedirs(uninstalled_dir, exist_ok=True)
         try:
-            os.rename(source, target)
+            atomic_replace(source, target)
         except OSError:
             # Move failed; event already written. Next scan will retry.
             # Mark entry.in_hub back to True so user can retry.
@@ -152,7 +154,7 @@ def forget(name: str, manifest: Manifest, event_log: EventLog,
 
     # Now move; if fails, next scan sees forget event and retries
     try:
-        os.rename(source, target)
+        atomic_replace(source, target)
     except OSError:
         if entry is not None:
             entry.in_hub = False
@@ -256,12 +258,12 @@ def gc(manifest: Manifest, event_log: EventLog, hub_path: Path,
                 # Not all hosts confirmed yet - keep blob, skip deletion
                 # Add to referenced to protect it
                 if entry.content_hash:
-                    referenced.add(entry.content_hash)
+                    referenced.add(entry.content_hash.replace(":", "-"))
         else:
             # Active / detached / uninstalled - all keep their blobs
             # (uninstalled is recoverable via forget, needs blob)
             if entry.content_hash:
-                referenced.add(entry.content_hash)
+                referenced.add(entry.content_hash.replace(":", "-"))
 
     removed = 0
 
@@ -282,7 +284,8 @@ def gc(manifest: Manifest, event_log: EventLog, hub_path: Path,
     for name, entry in purging_skills:
         if not entry.content_hash:
             continue
-        blob_dir = blobs_dir / entry.content_hash
+        from .cas import blob_path
+        blob_dir = blob_path(blobs_dir, entry.content_hash)
         if blob_dir.exists():
             if dry_run:
                 print(f"would remove purged blob: {entry.content_hash}")
@@ -344,14 +347,19 @@ def _safe_uninstall_path(name: str, uninstalled_dir: Path) -> Path:
 
     See docs/PRD.md §9.5 F5.7.
     """
-    if not SKILL_NAME_RE.match(name):
+    if not SKILL_NAME_RE.match(name) or not is_safe_portable_name(name):
         raise LifecycleError(f"invalid skill name: {name!r}")
 
-    uninstalled_dir.resolve().mkdir(parents=True, exist_ok=True)
+    if (uninstalled_dir.is_symlink()
+            or distribution.is_junction(uninstalled_dir)):
+        raise PathEscape(".uninstalled root is a link/junction, refusing")
+
+    uninstalled_dir.mkdir(parents=True, exist_ok=True)
+    safe_root = uninstalled_dir.resolve()
     target = (uninstalled_dir / name).resolve()
 
     # Must be direct child of uninstalled_dir
-    if target.parent != uninstalled_dir.resolve():
+    if target.parent != safe_root:
         raise PathEscape(f"path escapes .uninstalled/: {name}")
 
     # Must not be a symlink (could point outside)

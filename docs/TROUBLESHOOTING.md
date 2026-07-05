@@ -206,13 +206,16 @@ python3 skillmesh.py status
 
 ### event 文件损坏
 
-skillmesh 会把损坏 event 移到 `events/<event_dir>/.corrupt/`，不阻塞 scan。检查：
+event 是跨机真相源。schema、JSON 或文件名 checksum 任一校验失败时，
+skillmesh 会停止整个 replay，不移动文件，也不会用部分 event 集合覆盖
+manifest。先等待同步客户端完成下载，再重试：
 
 ```bash
-find <hub>/events -name '.corrupt' -type d
+python3 skillmesh.py scan
 ```
 
-如有，人工查看损坏内容并决定是否手动修复。
+若仍失败，从另一台健康机器或 backup 恢复报错中指明的 event。不要直接删除；
+删除 append-only event 可能让所有机器收敛到错误状态。
 
 ## Daemon
 

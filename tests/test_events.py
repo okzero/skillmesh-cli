@@ -82,8 +82,8 @@ def test_read_all_returns_sorted(tmp_path):
     assert lamports == sorted(lamports)
 
 
-def test_corrupt_event_quarantined(tmp_path):
-    """T14: corrupt event files are moved to .corrupt/ and skipped, not crash."""
+def test_corrupt_event_aborts_replay_without_mutation(tmp_path):
+    """T14: corrupt truth-source events fail closed and remain in place."""
     host = _make_host(tmp_path)
     event_log = EventLog(tmp_path / "events", host)
     event_log.write("add", _make_entry("good-skill"))
@@ -93,14 +93,24 @@ def test_corrupt_event_quarantined(tmp_path):
     corrupt_file = host_subdir / "999-999-badbadbad.json"
     corrupt_file.write_text("{ not valid json")
 
-    # Should not raise - corrupt file quarantined
-    events_list = event_log.read_all()
-    assert len(events_list) == 1  # only the good one
+    with pytest.raises(events.EventCorruptError, match="Replay aborted"):
+        event_log.read_all()
+    assert corrupt_file.exists()
+    assert not (host_subdir / ".corrupt").exists()
 
-    # Corrupt file moved to .corrupt/
-    corrupt_dir = host_subdir / ".corrupt"
-    assert corrupt_dir.exists()
-    assert len(list(corrupt_dir.glob("*.json"))) == 1
+
+def test_event_filename_checksum_tamper_aborts_replay(tmp_path):
+    host = _make_host(tmp_path)
+    event_log = EventLog(tmp_path / "events", host)
+    event = event_log.write("add", _make_entry("original"))
+    event_file = event_log.host_dir / event.filename
+    payload = json.loads(event_file.read_text())
+    payload["skill"]["name"] = "tampered"
+    event_file.write_text(json.dumps(payload, sort_keys=True))
+
+    with pytest.raises(events.EventCorruptError, match="checksum mismatch"):
+        event_log.read_all()
+    assert event_file.exists()
 
 
 def test_seq_increments_monotonically(tmp_path):

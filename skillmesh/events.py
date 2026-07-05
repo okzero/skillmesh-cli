@@ -20,6 +20,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator, List, Optional
 
+from .platform_support import atomic_replace
+
 
 SCHEMA_VERSION = 1
 VALID_OPS = {
@@ -66,6 +68,10 @@ class SkillEntry:
             content_hash=data.get("content_hash", ""),
             target_override=data.get("target_override"),
         )
+
+
+class EventCorruptError(RuntimeError):
+    """Raised when an event cannot be trusted for deterministic replay."""
 
 
 @dataclass
@@ -132,9 +138,7 @@ class EventLog:
         if op not in VALID_OPS:
             raise ValueError(f"invalid op: {op} (must be one of {VALID_OPS})")
 
-        prev_lamport = self.host.lamport
-        seq = self.host.next_seq()
-        lamport = self.host.tick_lamport()
+        seq, lamport, prev_lamport = self.host.reserve_event_clock()
 
         event = Event(
             id=str(uuid_lib.uuid4()),
@@ -154,16 +158,17 @@ class EventLog:
             json.dumps(event.to_dict(), sort_keys=True, ensure_ascii=False)
         )
         final = self.host_dir / event.filename
-        os.rename(tmp, final)  # atomic
+        atomic_replace(tmp, final)
         return event
 
     def read_all(self) -> List[Event]:
         """Read all events across all host subdirs.
 
         Returns sorted by (lamport, host_id, seq, id) for deterministic replay.
-        Corrupt events are moved to .corrupt/ subdir and skipped (with warning).
+        Any corrupt or checksum-mismatched event aborts replay without moving
+        shared files. Partial replay would violate fail-closed semantics.
         """
-        events = []
+        events: List[Event] = []
         if not self.events_dir.exists():
             return events
 
@@ -175,9 +180,18 @@ class EventLog:
             for f in sorted(host_subdir.glob("*.json")):
                 try:
                     data = json.loads(f.read_text())
-                    events.append(Event.from_dict(data))
+                    event = Event.from_dict(data)
+                    if f.name != event.filename:
+                        raise ValueError(
+                            f"filename checksum mismatch: expected "
+                            f"{event.filename}"
+                        )
+                    events.append(event)
                 except (json.JSONDecodeError, KeyError, ValueError) as e:
-                    _quarantine_corrupt(f, host_subdir, e)
+                    raise EventCorruptError(
+                        f"corrupt event {f}: {e}. Replay aborted; wait for "
+                        f"sync completion or restore the file from backup."
+                    ) from e
 
         events.sort(key=lambda e: (e.lamport, e.host, e.seq, e.id))
         return events
@@ -207,19 +221,3 @@ def _validate_schema(data: dict) -> None:
         raise ValueError(f"invalid op: {data['op']}")
     if not isinstance(data["skill"], dict):
         raise ValueError("skill must be a dict")
-
-
-def _quarantine_corrupt(file: Path, host_subdir: Path, err: Exception) -> None:
-    """Move corrupt event file to .corrupt/ subdir, do not delete."""
-    import sys
-    corrupt_dir = host_subdir / ".corrupt"
-    corrupt_dir.mkdir(exist_ok=True)
-    target = corrupt_dir / file.name
-    try:
-        os.rename(file, target)
-    except OSError:
-        pass  # already moved?
-    print(
-        f"warn: skip corrupt event {file.name}: {err}",
-        file=sys.stderr,
-    )

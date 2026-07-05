@@ -14,7 +14,9 @@ import pytest
 SKILLMESH_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(SKILLMESH_ROOT))
 
+from skillmesh import cli as cli_mod, distribution
 from skillmesh.cli import main
+from conftest import set_test_home
 
 
 HOST_A_ID = "aaaaaaaa-0000-0000-0000-000000000000"
@@ -63,9 +65,12 @@ def test_cli_init_generates_config_and_host(tmp_path, monkeypatch):
     """init creates config + host.json."""
     fake_home = tmp_path / "home"
     fake_home.mkdir()
-    monkeypatch.setenv("HOME", str(fake_home))
+    set_test_home(monkeypatch, fake_home)
     monkeypatch.delenv("SKILLMESH_CONFIG", raising=False)
     monkeypatch.delenv("SKILLMESH_HOST_ID", raising=False)
+    monkeypatch.setenv(
+        "SKILLMESH_CONFIG_DIR", str(fake_home / ".config" / "skillmesh")
+    )
 
     rc = main(["init"])
     assert rc == 0
@@ -75,10 +80,39 @@ def test_cli_init_generates_config_and_host(tmp_path, monkeypatch):
     assert (config_dir / "host.json").exists()
 
 
+def test_windows_python310_init_rewrites_json_defaults(tmp_path, monkeypatch):
+    """Windows 3.9/3.10 init must not emit macOS/Linux paths."""
+    config_dir = tmp_path / "windows-config"
+    monkeypatch.setenv("SKILLMESH_CONFIG_DIR", str(config_dir))
+    monkeypatch.setattr(cli_mod.sys, "version_info", (3, 10, 0))
+    monkeypatch.setattr(
+        cli_mod.platform_support, "system_name", lambda: "Windows"
+    )
+    monkeypatch.setattr(
+        cli_mod.host_mod,
+        "load_or_create_host",
+        lambda: type("TestHost", (), {
+            "host_id": "windows-test-host",
+            "display_name": "windows-test",
+        })(),
+    )
+
+    assert main(["init"]) == 0
+    generated = json.loads((config_dir / "config.json").read_text())
+    assert generated["hub"] == {
+        "path": "%USERPROFILE%/skillmesh-hub",
+        "sync_backend": "manual",
+        "compact_threshold": 1000,
+    }
+    assert generated["backup"]["path"] == (
+        "%LOCALAPPDATA%/skillmesh/backups"
+    )
+
+
 def test_cli_scan_discovers_and_distributes(tmp_path, monkeypatch):
     """scan via CLI discovers skill and creates symlinks."""
     home, hub, src_dir, config_path = _make_machine(tmp_path, HOST_A_ID)
-    monkeypatch.setenv("HOME", str(home))
+    set_test_home(monkeypatch, home)
     monkeypatch.setenv("SKILLMESH_CONFIG", str(config_path))
 
     # Create a skill
@@ -91,14 +125,14 @@ def test_cli_scan_discovers_and_distributes(tmp_path, monkeypatch):
 
     # Symlink created
     link = home / ".codex" / "skills" / "my-skill"
-    assert link.is_symlink()
+    assert distribution.inspect(link, hub / "skills" / "my-skill").correct
     assert (link / "SKILL.md").exists()
 
 
 def test_cli_status_shows_skill(tmp_path, monkeypatch, capsys):
     """status via CLI shows the skill."""
     home, hub, src_dir, config_path = _make_machine(tmp_path, HOST_A_ID)
-    monkeypatch.setenv("HOME", str(home))
+    set_test_home(monkeypatch, home)
     monkeypatch.setenv("SKILLMESH_CONFIG", str(config_path))
 
     skill_dir = src_dir / "my-skill"
@@ -118,7 +152,7 @@ def test_cli_status_shows_skill(tmp_path, monkeypatch, capsys):
 def test_cli_uninstall_forget_roundtrip(tmp_path, monkeypatch):
     """uninstall + forget via CLI works end-to-end."""
     home, hub, src_dir, config_path = _make_machine(tmp_path, HOST_A_ID)
-    monkeypatch.setenv("HOME", str(home))
+    set_test_home(monkeypatch, home)
     monkeypatch.setenv("SKILLMESH_CONFIG", str(config_path))
 
     skill_dir = src_dir / "my-skill"
@@ -144,7 +178,7 @@ def test_cli_uninstall_forget_roundtrip(tmp_path, monkeypatch):
 def test_cli_purge_requires_yes(tmp_path, monkeypatch):
     """purge without --yes exits non-zero (argparse required=True)."""
     home, hub, src_dir, config_path = _make_machine(tmp_path, HOST_A_ID)
-    monkeypatch.setenv("HOME", str(home))
+    set_test_home(monkeypatch, home)
     monkeypatch.setenv("SKILLMESH_CONFIG", str(config_path))
 
     skill_dir = src_dir / "my-skill"
@@ -169,7 +203,7 @@ def test_cli_dual_machine_convergence(tmp_path, monkeypatch):
     home_b, hub_b, src_b, config_b = _make_machine(machine_b, HOST_B_ID)
 
     # A creates and scans skill
-    monkeypatch.setenv("HOME", str(home_a))
+    set_test_home(monkeypatch, home_a)
     monkeypatch.setenv("SKILLMESH_CONFIG", str(config_a))
     skill_dir = src_a / "shared-skill"
     skill_dir.mkdir()
@@ -179,14 +213,17 @@ def test_cli_dual_machine_convergence(tmp_path, monkeypatch):
 
     # Verify A has skill
     assert (hub_a / "skills" / "shared-skill").exists()
-    assert (home_a / ".codex" / "skills" / "shared-skill").is_symlink()
+    assert distribution.inspect(
+        home_a / ".codex" / "skills" / "shared-skill",
+        hub_a / "skills" / "shared-skill",
+    ).correct
 
     # Sync hub from A to B (simulating cloud drive)
     shutil.rmtree(hub_b)
     shutil.copytree(hub_a, hub_b)
 
     # B scans
-    monkeypatch.setenv("HOME", str(home_b))
+    set_test_home(monkeypatch, home_b)
     monkeypatch.setenv("SKILLMESH_CONFIG", str(config_b))
     rc = main(["scan"])
     assert rc == 0
@@ -196,13 +233,15 @@ def test_cli_dual_machine_convergence(tmp_path, monkeypatch):
     assert (hub_b / "skills" / "shared-skill" / "SKILL.md").read_text() == "# from machine A"
     # B's agent dir has symlink
     link_b = home_b / ".codex" / "skills" / "shared-skill"
-    assert link_b.is_symlink()
+    assert distribution.inspect(
+        link_b, hub_b / "skills" / "shared-skill"
+    ).correct
 
 
 def test_cli_backup_rollback_roundtrip(tmp_path, monkeypatch):
     """backup + rollback via CLI works end-to-end."""
     home, hub, src_dir, config_path = _make_machine(tmp_path, HOST_A_ID)
-    monkeypatch.setenv("HOME", str(home))
+    set_test_home(monkeypatch, home)
     monkeypatch.setenv("SKILLMESH_CONFIG", str(config_path))
 
     skill_dir = src_dir / "my-skill"
@@ -227,13 +266,16 @@ def test_cli_backup_rollback_roundtrip(tmp_path, monkeypatch):
     assert (hub / "skills" / "my-skill").exists()
     assert (hub / "skills" / "my-skill" / "SKILL.md").read_text() == "# original"
     # Symlink rebuilt by rollback's apply step
-    assert (home / ".codex" / "skills" / "my-skill").is_symlink()
+    assert distribution.inspect(
+        home / ".codex" / "skills" / "my-skill",
+        hub / "skills" / "my-skill",
+    ).correct
 
 
 def test_cli_invariants_passes_when_clean(tmp_path, monkeypatch):
     """invariants via CLI returns 0 when no violations."""
     home, hub, src_dir, config_path = _make_machine(tmp_path, HOST_A_ID)
-    monkeypatch.setenv("HOME", str(home))
+    set_test_home(monkeypatch, home)
     monkeypatch.setenv("SKILLMESH_CONFIG", str(config_path))
 
     skill_dir = src_dir / "my-skill"
@@ -245,10 +287,31 @@ def test_cli_invariants_passes_when_clean(tmp_path, monkeypatch):
     assert rc == 0
 
 
+def test_cli_1000_empty_scans_do_not_rewrite_manifest(
+    tmp_path, monkeypatch, capsys
+):
+    home, hub, src_dir, config_path = _make_machine(tmp_path, HOST_A_ID)
+    set_test_home(monkeypatch, home)
+    monkeypatch.setenv("SKILLMESH_CONFIG", str(config_path))
+    (src_dir / "my-skill").mkdir()
+    (src_dir / "my-skill" / "SKILL.md").write_text("# stable")
+    assert main(["scan"]) == 0
+    capsys.readouterr()
+
+    manifest_path = hub / "manifest.json"
+    original = manifest_path.read_bytes()
+    original_mtime = manifest_path.stat().st_mtime_ns
+    for _ in range(1000):
+        assert main(["scan"]) == 0
+
+    assert manifest_path.read_bytes() == original
+    assert manifest_path.stat().st_mtime_ns == original_mtime
+
+
 def test_cli_dry_run_makes_no_changes(tmp_path, monkeypatch):
     """scan --dry-run writes nothing."""
     home, hub, src_dir, config_path = _make_machine(tmp_path, HOST_A_ID)
-    monkeypatch.setenv("HOME", str(home))
+    set_test_home(monkeypatch, home)
     monkeypatch.setenv("SKILLMESH_CONFIG", str(config_path))
 
     skill_dir = src_dir / "my-skill"
@@ -259,6 +322,18 @@ def test_cli_dry_run_makes_no_changes(tmp_path, monkeypatch):
     assert rc == 0
 
     # No blobs, no events, no symlinks
-    assert not any((hub / "blobs").iterdir())
-    assert not any((hub / "events").iterdir())
+    assert not (hub / "blobs").exists()
+    assert not (hub / "events").exists()
     assert not (home / ".codex" / "skills" / "my-skill").exists()
+
+
+def test_cli_dry_run_does_not_create_missing_hub(tmp_path, monkeypatch):
+    home, hub, src_dir, config_path = _make_machine(tmp_path, HOST_A_ID)
+    set_test_home(monkeypatch, home)
+    monkeypatch.setenv("SKILLMESH_CONFIG", str(config_path))
+    (src_dir / "my-skill").mkdir()
+    (src_dir / "my-skill" / "SKILL.md").write_text("# test")
+    shutil.rmtree(hub)
+
+    assert main(["scan", "--dry-run"]) == 0
+    assert not hub.exists()

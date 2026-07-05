@@ -21,6 +21,7 @@ from typing import Dict, List, Optional
 
 from .config import Config
 from .events import Event, EventLog, SkillEntry
+from .platform_support import atomic_replace
 
 
 @dataclass
@@ -107,7 +108,8 @@ class Manifest:
 
 
 def load_or_rebuild(manifest_path: Path, snapshot: dict, event_log: EventLog,
-                    config: Config, host_id: str) -> Manifest:
+                    config: Config, host_id: str,
+                    repair: bool = True) -> Manifest:
     """Load manifest if valid, else rebuild from snapshot + events.
 
     See docs/ARCHITECTURE.md §11.1 for failure recovery.
@@ -121,9 +123,11 @@ def load_or_rebuild(manifest_path: Path, snapshot: dict, event_log: EventLog,
             if manifest.event_fingerprint == current_fp:
                 return manifest
         except (json.JSONDecodeError, KeyError):
-            # Corrupt - rename and rebuild
-            corrupt = manifest_path.with_suffix(".corrupt")
-            os.rename(manifest_path, corrupt)
+            # Corrupt - quarantine only for an executing command. Read-only
+            # planning must not mutate the hub.
+            if repair:
+                corrupt = manifest_path.with_suffix(".corrupt")
+                atomic_replace(manifest_path, corrupt)
 
     return rebuild(snapshot, event_log, config, host_id)
 
@@ -199,7 +203,7 @@ def save(manifest: Manifest, manifest_path: Path) -> None:
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = manifest_path.with_suffix(".tmp")
     tmp.write_text(json.dumps(manifest.to_dict(), sort_keys=True, ensure_ascii=False))
-    os.rename(tmp, manifest_path)
+    atomic_replace(tmp, manifest_path)
 
 
 def _apply_event(skills: dict, tombstones: dict, conflicts: dict,
@@ -309,6 +313,7 @@ def _snapshot_agents(config: Config) -> dict:
             "accept_sources": a.accept_sources,
             "layout": a.layout,
             "target_filename": a.target_filename,
+            "link_mode": a.link_mode,
         }
         for a in config.agents
     }

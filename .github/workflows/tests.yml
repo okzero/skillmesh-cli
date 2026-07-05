@@ -12,7 +12,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
         python-version: ['3.9', '3.10', '3.11', '3.12', '3.13']
 
     steps:
@@ -23,11 +23,30 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Run tests
+      - name: Install development dependencies
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Static quality gates
+        env:
+          RUFF_CACHE_DIR: ${{ runner.temp }}/ruff-cache
         run: |
-          python3 -m pytest tests/ -v
+          python -m ruff check .
+          python -m mypy skillmesh
+
+      - name: Run tests
+        env:
+          HOME: ${{ runner.temp }}/skillmesh-test-home
+        run: python -m pytest tests/ -v -p no:cacheprovider
 
       - name: Verify CLI starts
         run: |
-          python3 skillmesh.py --help
-          python3 skillmesh.py --version
+          python skillmesh.py --help
+          python skillmesh.py --version
+
+  l4-pr-evidence:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate L4 PR evidence
+        run: python scripts/l4_gate.py check-pr --event "$GITHUB_EVENT_PATH"

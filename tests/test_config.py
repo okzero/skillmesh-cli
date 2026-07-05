@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from skillmesh import config as cfg
-from conftest import _minimal_toml_config, _minimal_json_config
+from conftest import _minimal_toml_config, _minimal_json_config, set_test_home
 
 
 def test_load_toml_config(isolated_env):
@@ -37,8 +37,12 @@ def test_toml_on_old_python_errors(isolated_env, monkeypatch):
     """T21c: Python 3.10- loading .toml raises clear error."""
     if sys.version_info >= (3, 11):
         pytest.skip("Test only applies to Python < 3.11")
+    # The generic fixture creates JSON on old Python. Use an explicit TOML
+    # input so this test exercises the unsupported format.
+    toml_path = isolated_env.config_dir / "config.toml"
+    toml_path.write_text(_minimal_toml_config(isolated_env), encoding="utf-8")
     with pytest.raises(cfg.ConfigError) as exc:
-        cfg.load_config(str(isolated_env.config))
+        cfg.load_config(str(toml_path))
     assert "Python 3.11" in str(exc.value) or "JSON" in str(exc.value)
 
 
@@ -89,6 +93,23 @@ def test_file_layout_requires_target_filename(tmp_path):
     assert "target_filename" in str(exc.value)
 
 
+def test_link_mode_defaults_to_auto_and_rejects_unknown(isolated_env_json):
+    config = cfg.load_config(str(isolated_env_json.config))
+    assert all(agent.link_mode == "auto" for agent in config.agents)
+    config.agents[0].link_mode = "magic"
+    with pytest.raises(cfg.ConfigError, match="link_mode"):
+        config.validate()
+
+
+def test_junction_link_mode_requires_directory_layout():
+    agent = cfg.Agent(
+        "cursor", "~/rules", ["work"], layout="file",
+        target_filename="{skill}.mdc", link_mode="junction",
+    )
+    with pytest.raises(cfg.ConfigError, match="junction.*directory"):
+        agent.validate()
+
+
 def test_file_layout_requires_skill_placeholder(tmp_path):
     """T37: target_filename without {skill} placeholder is rejected."""
     raw = {
@@ -121,6 +142,34 @@ def test_duplicate_agent_names_rejected(tmp_path):
         config.validate()
 
 
+def test_nonportable_file_target_template_rejected(tmp_path):
+    raw = {
+        "hub": {"path": str(tmp_path / "hub")},
+        "agents": [{
+            "name": "x", "dir": "~/x", "accept_sources": [],
+            "layout": "file", "target_filename": "{skill}:stream",
+        }],
+        "formats": [{"name": "skill", "filename": "SKILL.md"}],
+        "watch": {"dirs": ["~/x"]},
+    }
+    with pytest.raises(cfg.ConfigError, match="not portable"):
+        cfg._normalize(raw).validate()
+
+
+def test_nonportable_format_filename_rejected(tmp_path):
+    raw = {
+        "hub": {"path": str(tmp_path / "hub")},
+        "agents": [{
+            "name": "x", "dir": "~/x", "accept_sources": [],
+            "layout": "directory",
+        }],
+        "formats": [{"name": "bad", "filename": "AUX.txt"}],
+        "watch": {"dirs": ["~/x"]},
+    }
+    with pytest.raises(cfg.ConfigError, match="not portable"):
+        cfg._normalize(raw).validate()
+
+
 def test_missing_config_path_errors():
     """ConfigError raised when config not found."""
     with pytest.raises(cfg.ConfigError, match="config not found|no config"):
@@ -129,7 +178,7 @@ def test_missing_config_path_errors():
 
 def test_no_config_anywhere_errors(tmp_path, monkeypatch):
     """ConfigError raised when no config found anywhere."""
-    monkeypatch.setenv("HOME", str(tmp_path))
+    set_test_home(monkeypatch, tmp_path)
     monkeypatch.delenv("SKILLMESH_CONFIG", raising=False)
     with pytest.raises(cfg.ConfigError, match="no config"):
         cfg.load_config(None)

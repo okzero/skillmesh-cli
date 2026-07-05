@@ -3,6 +3,7 @@
 Covers F8.1-F8.7, T1, T16.
 """
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -36,6 +37,38 @@ def test_backup_creates_tar_with_hash(tmp_path):
     hashes = json.loads((backup_dir / "hashes.json").read_text())
     assert "sha256" in hashes
     assert hashes["size"] > 0
+
+
+def test_rollback_unlinks_junction_instead_of_traversing(tmp_path, monkeypatch):
+    """Windows reparse points must not be recursively deleted on rollback."""
+    hub = tmp_path / "hub"
+    events = hub / "events"
+    events.mkdir(parents=True)
+    backup_dir = tmp_path / "backup"
+    backup_dir.mkdir()
+
+    import tarfile
+    tar_path = backup_dir / "hub.tar"
+    with tarfile.open(tar_path, "w:gz"):
+        pass
+    (backup_dir / "hashes.json").write_text(
+        json.dumps(backup._compute_hashes(tar_path))
+    )
+
+    removed = []
+    monkeypatch.setattr(
+        backup.distribution, "is_junction", lambda path: path == events
+    )
+    real_rmdir = backup.os.rmdir
+
+    def safe_rmdir(path):
+        removed.append(Path(path))
+        real_rmdir(path)
+
+    monkeypatch.setattr(backup.os, "rmdir", safe_rmdir)
+    backup.rollback(backup_dir, hub)
+    assert removed == [events]
+    assert not events.exists()
 
 
 def test_backup_includes_all_targets(tmp_path):
@@ -175,6 +208,7 @@ def test_safe_extract_rejects_path_traversal(tmp_path):
 
     with pytest.raises(backup.BackupError, match="traversal|symlink"):
         backup.rollback(backup_dir, hub)
+    assert (hub / "skills" / "test-skill" / "SKILL.md").exists()
 
 
 def test_safe_extract_rejects_symlink_member(tmp_path):
@@ -202,3 +236,4 @@ def test_safe_extract_rejects_symlink_member(tmp_path):
 
     with pytest.raises(backup.BackupError, match="symlink"):
         backup.rollback(backup_dir, hub)
+    assert (hub / "skills" / "test-skill" / "SKILL.md").exists()

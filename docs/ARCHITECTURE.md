@@ -176,7 +176,7 @@ def materialize(content_hash, skill_name):
 events/<event_dir>/<lamport>-<seq>-<checksum>.json
 ```
 
-- `event_dir = <hostname>-<uuid8>`（如 `mac-a-abcd1234`），hostname 仅可读前缀
+- `event_dir = <portable-host-prefix>-<uuid8>`（如 `mac-a-abcd1234`）；原始 hostname 只展示，路径前缀会替换 Windows 非法字符并避免 `.` 开头
 - 文件名 = `<lamport>-<seq>-<checksum>`，三者确定文件唯一性
 - `checksum` = sha256(event content 前 16 字符，防冲突文件名碰撞
 
@@ -679,13 +679,13 @@ def load_snapshot():
 def load_events():
     for f in EVENT_DIR.glob("*.json"):
         try:
-            yield load_and_validate(f)
+            event = load_and_validate(f)
+            verify_filename_checksum(f, event)
+            yield event
         except SchemaError as e:
-            warn(f"skip corrupt event {f.name}: {e}")
-            # 不删，移到 .corrupt/ 留待人工排查
-            corrupt_dir = EVENT_DIR / ".corrupt"
-            corrupt_dir.mkdir(exist_ok=True)
-            os.rename(f, corrupt_dir / f.name)
+            # fail-closed：不能用部分 event 集合派生 manifest。
+            # 不移动共享真相源；等待同步完成或从 backup 恢复。
+            raise FailClosed(f"corrupt event {f.name}: {e}")
 ```
 
 ### 11.4 backup/rollback
@@ -705,10 +705,10 @@ def backup():
 
 def rollback(tar_path):
     # 1. 校验 hash
-    # 2. 删 hub/snapshot/events/blobs/skills/.uninstalled
-    # 3. 解 tar 还原
-    # 4. scan 重建 manifest
-    # 5. apply 重建软链
+    # 2. 在修改 hub 前验证全部 member 路径与类型
+    # 3. 删 hub/snapshot/events/blobs/skills/.uninstalled
+    # 4. 解 tar 还原
+    # 5. scan 重建 manifest + apply 重建本机分发目标
 ```
 
 ---
@@ -1035,7 +1035,8 @@ def test_corrupt_event_recovery(isolated_env):
 - WebDAV 内置 sync 客户端（v1.2，坚果云原生支持）
 - skill 依赖图（v2）
 - 团队共享 hub 权限模型（v2）
-- Windows junction point 适配（v2）
+- Windows 0.2+ 使用 junction（目录）、symlink（文件）和受管 copy 降级；
+  本地 `managed-targets.json` 以 hash 保护 copy，用户修改后 fail-closed。
 - single-file layout 多 skill 合并策略（v1.1）
 - skill 内容编辑器（不做）
 - skill 市场（不做）

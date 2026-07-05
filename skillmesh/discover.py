@@ -15,7 +15,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
 
+from . import distribution
 from .config import Config
+from .platform_support import is_safe_portable_name
 
 
 @dataclass
@@ -163,7 +165,7 @@ def _walk_with_exclude(root: Path, exclude_patterns):
             if any(ex.startswith("/") and ex[1:] in segments
                    for ex in exclude_patterns):
                 continue
-            if os.path.islink(full):
+            if os.path.islink(full) or distribution.is_junction(Path(full)):
                 continue
             kept.append(d)
         dirnames[:] = kept
@@ -176,7 +178,8 @@ def _try_match_skill(root_path: Path, files: list, config: Config,
     for fmt in config.formats:
         if fmt.filename in files:
             name = root_path.name
-            if not re.match(r"^[a-zA-Z0-9._-]+$", name):
+            if (not re.match(r"^[a-zA-Z0-9._-]+$", name)
+                    or not is_safe_portable_name(name)):
                 return None  # invalid name, skip
             source = derive_source(root_path, config.sources)
             version = extract_version(root_path, fmt.name, fmt.filename)

@@ -206,7 +206,7 @@ def load_config(explicit_path: Optional[str] = None) -> Config:
         with open(path, "rb") as f:
             raw = tomllib.load(f)
     elif path.suffix == ".json":
-        raw = json.loads(path.read_text())
+        raw = json.loads(path.read_text(encoding="utf-8"))
         raw = {k: v for k, v in raw.items() if not k.startswith("_")}
     else:
         raise ConfigError(f"unsupported config format: {path.suffix}")

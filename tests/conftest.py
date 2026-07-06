@@ -164,8 +164,9 @@ def activate(env: SkillmeshEnv, monkeypatch) -> None:
 
 
 def _minimal_toml_config(hub_dir: Path) -> str:
+    hub_path = json.dumps(str(hub_dir))
     return f"""[hub]
-path = "{hub_dir}"
+path = {hub_path}
 sync_backend = "manual"
 
 [[sources]]

@@ -53,10 +53,12 @@ def test_content_hash_excludes_junk_files(tmp_path):
 
 def test_content_hash_normalizes_line_endings(tmp_path):
     """CRLF and LF produce same hash."""
-    skill1 = _make_skill(tmp_path, "s1", "line1\nline2\n")
+    skill1 = _make_skill(tmp_path, "s1", "")
+    (skill1 / "SKILL.md").write_bytes(b"line1\nline2\n")
     sub = tmp_path / "sub"
     sub.mkdir()
-    skill2 = _make_skill(sub, "s1", "line1\r\nline2\r\n")
+    skill2 = _make_skill(sub, "s1", "")
+    (skill2 / "SKILL.md").write_bytes(b"line1\r\nline2\r\n")
     h1 = cas.compute_content_hash(skill1, "s1", "skill-md", "")
     h2 = cas.compute_content_hash(skill2, "s1", "skill-md", "")
     assert h1 == h2

@@ -242,6 +242,11 @@ def test_windows_atomic_replace_retries_sharing_violation(tmp_path, monkeypatch)
 
 def test_cas_uses_portable_directory_and_migrates_legacy(tmp_path):
     blobs = tmp_path / "blobs"
+    assert cas.blob_path(blobs, "sha256:abc", legacy_fallback=False) == (
+        blobs / "sha256-abc"
+    )
+    if os.name == "nt":
+        pytest.skip("NTFS cannot create the pre-0.2 colon directory name")
     legacy = blobs / "sha256:abc"
     legacy.mkdir(parents=True)
     assert cas.migrate_legacy_blob_names(blobs) == 1

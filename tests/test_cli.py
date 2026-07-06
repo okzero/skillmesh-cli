@@ -98,7 +98,9 @@ def test_windows_python310_init_rewrites_json_defaults(tmp_path, monkeypatch):
     )
 
     assert main(["init"]) == 0
-    generated = json.loads((config_dir / "config.json").read_text())
+    generated = json.loads(
+        (config_dir / "config.json").read_text(encoding="utf-8")
+    )
     assert generated["hub"] == {
         "path": "%USERPROFILE%/skillmesh-hub",
         "sync_backend": "manual",

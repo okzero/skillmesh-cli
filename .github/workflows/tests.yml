@@ -36,7 +36,7 @@ jobs:
       - name: Run tests
         env:
           HOME: ${{ runner.temp }}/skillmesh-test-home
-        run: python -m pytest tests/ -v -p no:cacheprovider
+        run: python scripts/ci_pytest.py
 
       - name: Verify CLI starts
         run: |

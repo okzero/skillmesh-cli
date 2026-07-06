@@ -4,8 +4,9 @@ from __future__ import annotations
 import os
 import platform
 import time
+from importlib import import_module
 from pathlib import Path
-from typing import IO, Optional
+from typing import IO, Optional, Protocol, cast
 
 
 WINDOWS_RESERVED_NAMES = {
@@ -18,6 +19,30 @@ WINDOWS_INVALID_NAME_CHARS = set('<>:"/\\|?*')
 
 class LockBusy(RuntimeError):
     """Raised when a non-blocking process lock is already held."""
+
+
+class _MsvcrtModule(Protocol):
+    LK_LOCK: int
+    LK_NBLCK: int
+    LK_UNLCK: int
+
+    def locking(self, fd: int, mode: int, nbytes: int) -> None: ...
+
+
+class _FcntlModule(Protocol):
+    LOCK_EX: int
+    LOCK_NB: int
+    LOCK_UN: int
+
+    def flock(self, fd: int, operation: int) -> None: ...
+
+
+def _msvcrt_module() -> _MsvcrtModule:
+    return cast(_MsvcrtModule, import_module("msvcrt"))
+
+
+def _fcntl_module() -> _FcntlModule:
+    return cast(_FcntlModule, import_module("fcntl"))
 
 
 def system_name() -> str:
@@ -99,12 +124,11 @@ class FileLock:
         stream.seek(0)
         try:
             if system_name() == "Windows":
-                import msvcrt
-                mode = (msvcrt.LK_LOCK if self.blocking  # type: ignore[attr-defined]
-                        else msvcrt.LK_NBLCK)  # type: ignore[attr-defined]
-                msvcrt.locking(stream.fileno(), mode, 1)  # type: ignore[attr-defined]
+                msvcrt = _msvcrt_module()
+                mode = msvcrt.LK_LOCK if self.blocking else msvcrt.LK_NBLCK
+                msvcrt.locking(stream.fileno(), mode, 1)
             else:
-                import fcntl
+                fcntl = _fcntl_module()
                 flags = fcntl.LOCK_EX
                 if not self.blocking:
                     flags |= fcntl.LOCK_NB
@@ -122,12 +146,10 @@ class FileLock:
         try:
             stream.seek(0)
             if system_name() == "Windows":
-                import msvcrt
-                msvcrt.locking(  # type: ignore[attr-defined]
-                    stream.fileno(), msvcrt.LK_UNLCK, 1  # type: ignore[attr-defined]
-                )
+                msvcrt = _msvcrt_module()
+                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
             else:
-                import fcntl
+                fcntl = _fcntl_module()
                 fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
         finally:
             stream.close()

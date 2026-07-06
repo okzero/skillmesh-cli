@@ -10,7 +10,7 @@ import subprocess
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Protocol, cast
 
 from .platform_support import FileLock, atomic_replace, state_dir
 
@@ -20,6 +20,14 @@ LINK_MODES = {"auto", "symlink", "junction", "copy"}
 
 class DistributionError(RuntimeError):
     pass
+
+
+class _Kernel32(Protocol):
+    def GetFileAttributesW(self, path: str) -> int: ...
+
+
+class _Windll(Protocol):
+    kernel32: _Kernel32
 
 
 @dataclass
@@ -89,9 +97,8 @@ def is_junction(path: Path) -> bool:
         return bool(native(path))
     try:
         import ctypes
-        attributes = ctypes.windll.kernel32.GetFileAttributesW(  # type: ignore[attr-defined]
-            str(path)
-        )
+        windll = cast(_Windll, getattr(ctypes, "windll"))
+        attributes = windll.kernel32.GetFileAttributesW(str(path))
         return attributes != -1 and bool(attributes & 0x400)
     except (AttributeError, OSError):
         return False
